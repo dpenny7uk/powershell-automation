@@ -344,20 +344,6 @@ def build_project_hierarchy(projects: list, api: Optional["TableauRestAPI"] = No
     return hierarchy
 
 
-def build_project_name_lookup(hierarchy: dict) -> dict:
-    """Convert ID-keyed hierarchy to name-keyed for repo DataFrame merging.
-
-    Where names collide, keeps the first occurrence (logs would catch this
-    at the API fetch stage if needed).
-    """
-    by_name = {}
-    for proj_data in hierarchy.values():
-        name = proj_data["name"]
-        if name not in by_name:
-            by_name[name] = proj_data
-    return by_name
-
-
 def fetch_api_data(
     server_url: str,
     api_version: str,
@@ -371,7 +357,7 @@ def fetch_api_data(
     all_hierarchies: dict[str, dict] = {}
     all_connections = []
     all_datasource_types = []
-    all_workbook_meta = []
+    all_workbook_project_map = []  # Maps workbook names to API project IDs
 
     try:
         for site_url in sites:
@@ -412,7 +398,7 @@ def fetch_api_data(
                 projects = api.get_projects()
                 logger.info(f"API [{site_url}]: {len(projects)} projects")
                 hierarchy = build_project_hierarchy(projects, api=api, logger=logger)
-                all_hierarchies[site_url] = build_project_name_lookup(hierarchy)
+                all_hierarchies[site_url] = hierarchy  # ID-keyed — merge via workbook project map
 
                 # Datasources
                 datasources = api.get_datasources()
@@ -430,6 +416,16 @@ def fetch_api_data(
                 logger.info(f"API [{site_url}]: {len(workbooks)} workbooks — fetching connections...")
 
                 for i, wb in enumerate(workbooks, 1):
+                    # Map workbook to its API project ID for accurate hierarchy merge
+                    wb_project_id = wb.get("project", {}).get("id", "")
+                    if wb_project_id:
+                        all_workbook_project_map.append({
+                            "site_content_url": site_url,
+                            "workbook_name": wb.get("name", ""),
+                            "project_name": wb.get("project", {}).get("name", ""),
+                            "api_project_id": wb_project_id,
+                        })
+
                     for conn in api.get_workbook_connections(wb["id"]):
                         ds_info = conn.get("datasource", {})
                         all_connections.append({
@@ -456,6 +452,7 @@ def fetch_api_data(
 
     return {
         "project_hierarchy": all_hierarchies,
+        "workbook_project_map": pd.DataFrame(all_workbook_project_map) if all_workbook_project_map else pd.DataFrame(),
         "workbook_connections": pd.DataFrame(all_connections) if all_connections else pd.DataFrame(),
         "datasource_types": pd.DataFrame(all_datasource_types) if all_datasource_types else pd.DataFrame(),
     }
@@ -486,17 +483,77 @@ def add_staleness_category(df: pd.DataFrame, last_accessed_col: str) -> pd.DataF
     return df
 
 
-def add_hierarchy_columns(df: pd.DataFrame, hierarchies: dict) -> pd.DataFrame:
-    """Add top_level_project and project_path via merge-style lookup."""
+def add_hierarchy_columns(df: pd.DataFrame, hierarchies: dict,
+                          wb_project_map: pd.DataFrame) -> pd.DataFrame:
+    """Add top_level_project and project_path via API project ID lookup.
+
+    Merges workbook → api_project_id (from API workbooks endpoint), then
+    looks up hierarchy by that ID. This avoids ambiguity when multiple
+    projects share the same name at different hierarchy levels.
+    """
+    # Step 1: Build flat lookup from ID-keyed hierarchies
     rows = []
-    for site_url, name_lookup in hierarchies.items():
-        for proj_name, data in name_lookup.items():
+    for site_url, id_lookup in hierarchies.items():
+        for proj_id, data in id_lookup.items():
             rows.append({
                 "site_content_url": site_url,
-                "project_name": proj_name,
+                "api_project_id": proj_id,
                 "top_level_project": data["top_level_project"],
                 "project_path": data["project_path"],
                 "project_depth": data["project_depth"],
+            })
+
+    if not rows or wb_project_map.empty:
+        df["top_level_project"] = ""
+        df["project_path"] = ""
+        df["project_depth"] = 0
+        return df
+
+    df_hier = pd.DataFrame(rows)
+
+    # Step 2: Attach API project ID to workbooks via (site, workbook_name, project_name)
+    df = df.merge(
+        wb_project_map[["site_content_url", "workbook_name", "project_name", "api_project_id"]],
+        on=["site_content_url", "workbook_name", "project_name"],
+        how="left",
+    )
+
+    # Step 3: Look up hierarchy by (site, api_project_id)
+    df = df.merge(
+        df_hier,
+        on=["site_content_url", "api_project_id"],
+        how="left",
+    )
+
+    df.drop(columns=["api_project_id"], inplace=True)
+    df[["top_level_project", "project_path"]] = df[["top_level_project", "project_path"]].fillna("")
+    df["project_depth"] = df["project_depth"].fillna(0)
+    return df
+
+
+def add_hierarchy_to_projects(df: pd.DataFrame, hierarchies: dict) -> pd.DataFrame:
+    """Add hierarchy columns to the Projects DataFrame using name-based lookup.
+
+    For the Projects sheet this is acceptable because each row represents a
+    project — the name ambiguity only causes issues when mapping workbooks
+    to projects (where the same project name at different levels gives
+    different paths). Here, duplicate project names will get the first match,
+    which is a minor cosmetic issue on the Projects sheet only.
+    """
+    rows = []
+    for site_url, id_lookup in hierarchies.items():
+        seen_names: set[str] = set()
+        for proj_data in id_lookup.values():
+            name = proj_data["name"]
+            if name in seen_names:
+                continue  # Skip duplicates — first wins
+            seen_names.add(name)
+            rows.append({
+                "site_content_url": site_url,
+                "project_name": name,
+                "top_level_project": proj_data["top_level_project"],
+                "project_path": proj_data["project_path"],
+                "project_depth": proj_data["project_depth"],
             })
 
     if not rows:
@@ -513,7 +570,7 @@ def add_hierarchy_columns(df: pd.DataFrame, hierarchies: dict) -> pd.DataFrame:
 
 def enrich_workbooks_with_api(df: pd.DataFrame, api_data: dict) -> pd.DataFrame:
     """Add hierarchy and datasource references from API."""
-    df = add_hierarchy_columns(df, api_data["project_hierarchy"])
+    df = add_hierarchy_columns(df, api_data["project_hierarchy"], api_data["workbook_project_map"])
 
     df_conn = api_data["workbook_connections"]
     if not df_conn.empty:
@@ -959,7 +1016,7 @@ def main():
 
     if not dfs["projects"].empty:
         if api_data:
-            dfs["projects"] = add_hierarchy_columns(dfs["projects"], api_data["project_hierarchy"])
+            dfs["projects"] = add_hierarchy_to_projects(dfs["projects"], api_data["project_hierarchy"])
         dfs["projects"]["snapshot_date"] = run_timestamp.strftime("%Y-%m-%d")
 
     if not dfs["datasources"].empty:
