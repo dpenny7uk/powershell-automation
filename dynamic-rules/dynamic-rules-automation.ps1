@@ -111,11 +111,24 @@ function Blob_Download {
                     Log "[DryRun] Would delete blob $blobName from container $StorageContainerName"
                 }
                 else {
-                    Get-AzStorageBlobContent -Blob $blobName -Container $StorageContainerName -Destination $localPath -Context $Context -Force
-                    Log "Downloaded $blobName to $localPath"
-                    Write-Host "Downloaded $blobName to $localPath"
-                    Remove-AzStorageBlob -Blob $blobName -Container $StorageContainerName -Context $Context -Force
-                    Log "Deleted blob $blobName from container $StorageContainerName"
+                    try {
+                        Get-AzStorageBlobContent -Blob $blobName -Container $StorageContainerName -Destination $localPath -Context $Context -Force
+                        Log "Downloaded $blobName to $localPath"
+                        Write-Host "Downloaded $blobName to $localPath"
+
+                        # Verify download before deleting source blob
+                        if ((Test-Path $localPath) -and (Get-Item $localPath).Length -eq $Blob.Length) {
+                            Remove-AzStorageBlob -Blob $blobName -Container $StorageContainerName -Context $Context -Force
+                            Log "Deleted blob $blobName from container $StorageContainerName"
+                        }
+                        else {
+                            Log "WARNING: Download verification failed for $blobName - blob NOT deleted from source"
+                        }
+                    }
+                    catch {
+                        Log "ERROR: Failed to process blob $blobName - $($_.Exception.Message)"
+                        continue
+                    }
                 }
             }
         }
