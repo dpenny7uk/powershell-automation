@@ -14,10 +14,14 @@
 
 .PARAMETER TableauPassword
     Service account password (sourced from Azure DevOps secret variable)
+.PARAMETER ExportCount
+    Number of partners to export. 0 = all (default). Use a small number for quick testing.
 .PARAMETER DryRun
     Preview mode - logs what would happen without executing exports
 .EXAMPLE
     .\Export-TableauDashboardPDF.ps1 -TableauPassword $env:TABLEAU_PASSWORD
+.EXAMPLE
+    .\Export-TableauDashboardPDF.ps1 -TableauPassword $env:TABLEAU_PASSWORD -ExportCount 3
 .EXAMPLE
     .\Export-TableauDashboardPDF.ps1 -TableauPassword $env:TABLEAU_PASSWORD -DryRun
 #>
@@ -28,6 +32,8 @@
 param(
     [Parameter(Mandatory)]
     [string]$TableauPassword,
+
+    [int]$ExportCount = 0,
 
     [switch]$DryRun
 )
@@ -57,6 +63,12 @@ if (-not (Test-Path $PartnersFile)) {
 $Partners = Get-Content $PartnersFile -Raw | ConvertFrom-Json
 if ($Partners.Count -eq 0) {
     throw "Partner list is empty"
+}
+
+# Limit partner count for testing
+if ($ExportCount -gt 0 -and $ExportCount -lt $Partners.Count) {
+    $totalPartners = $Partners.Count
+    $Partners = $Partners[0..($ExportCount - 1)]
 }
 #endregion
 
@@ -90,9 +102,7 @@ function Export-SinglePartner {
     param(
         [string]$Url,
         [string]$OutputFile,
-        [string]$PartnerFileName,
-        [int]$Counter,
-        [int]$Total
+        [string]$PartnerFileName
     )
 
     for ($attempt = 1; $attempt -le $MaxRetries; $attempt++) {
@@ -134,7 +144,6 @@ function Export-SinglePartner {
 $startTime = Get-Date
 $success = 0
 $failed = 0
-$suspect = 0
 
 try {
     Write-Log "========================================"
@@ -151,6 +160,9 @@ try {
 
     Write-Log "Report Period: $ReportPeriod"
     Write-Log "Partners: $($Partners.Count)"
+    if ($ExportCount -gt 0 -and $ExportCount -lt $totalPartners) {
+        Write-Log "TEST MODE: Limited to first $ExportCount of $totalPartners partners" -Level WARN
+    }
     if ($DryRun) { Write-Log "MODE: DRY RUN - No actual exports" -Level WARN }
 
     $ExportPath = Join-Path (Join-Path $LocalBasePath $Year) $FolderName
@@ -192,8 +204,7 @@ try {
             Write-Log "[$counter/$($Partners.Count)] Exporting $($partner.FileName)..."
 
             if (-not $DryRun) {
-                $result = Export-SinglePartner -Url $url -OutputFile $outputFile `
-                    -PartnerFileName $partner.FileName -Counter $counter -Total $Partners.Count
+                $result = Export-SinglePartner -Url $url -OutputFile $outputFile -PartnerFileName $partner.FileName
                 if ($result) { $success++ } else { $failed++ }
             } else {
                 Write-Log "  [DRY RUN] Would export: $($partner.FileName)"
@@ -209,12 +220,14 @@ try {
         }
         Write-Log "Logged out of Tableau"
 
+        Write-Log "Local export complete. Network copy will be handled by pipeline."
+
         $duration = "{0:hh\:mm\:ss}" -f ((Get-Date) - $startTime)
         Write-Log "========================================"
         Write-Log "COMPLETE: $success succeeded, $failed failed (Duration: $duration)" -Level $(if ($failed -eq 0) { "SUCCESS" } else { "WARN" })
         Write-Log "========================================"
 
-        # Set ADO variable for downstream steps
+        # Set ADO variables for downstream steps
         if ($IsADO) {
             Write-Host "##vso[task.setvariable variable=ExportPath]$ExportPath"
             Write-Host "##vso[task.setvariable variable=ExportSuccess]$success"
