@@ -50,8 +50,23 @@ def main():
     tool_usage = pd.read_excel(report_path, sheet_name="Tool Usage")
 
     # ── Get unique scheduled workflow IDs ─────────────────────────────────
-    scheduled_ids = set(schedules["workflowId"].dropna().unique())
-    print(f"Unique scheduled workflows: {len(scheduled_ids)}")
+    all_scheduled_ids = set(schedules["workflowId"].dropna().unique())
+    print(f"Unique scheduled workflows (all): {len(all_scheduled_ids)}")
+
+    # Filter to enabled schedules only if the column exists
+    if "enabled" in schedules.columns:
+        enabled_schedules = schedules[schedules["enabled"].astype(str).str.strip().str.upper().isin(["TRUE", "1"])]
+        disabled_schedules = schedules[~schedules["enabled"].astype(str).str.strip().str.upper().isin(["TRUE", "1"])]
+        scheduled_ids = set(enabled_schedules["workflowId"].dropna().unique())
+        disabled_ids = set(disabled_schedules["workflowId"].dropna().unique()) - scheduled_ids
+        print(f"Unique scheduled workflows (enabled): {len(scheduled_ids)}")
+        print(f"Unique scheduled workflows (disabled only): {len(disabled_ids)}")
+    else:
+        scheduled_ids = all_scheduled_ids
+        disabled_ids = set()
+        print("  (no 'enabled' column found — treating all as enabled)")
+
+    print(f"Using {len(scheduled_ids)} enabled scheduled workflows as primary scope")
 
     # ── Classify all workflows ────────────────────────────────────────────
     metadata["is_scheduled"] = metadata["id"].isin(scheduled_ids)
@@ -216,6 +231,8 @@ def main():
         ["", ""],
         ["Activity Classification", "Count"],
         ["Scheduled (must migrate)", int(metadata["activity_status"].eq("Scheduled").sum())],
+        ["  of which: enabled schedules", int(len(scheduled_ids))],
+        ["  of which: disabled schedule only", int(len(disabled_ids))],
         ["Active - Unscheduled, Recent (ran since 2024)", int(metadata["activity_status"].eq("Active (Unscheduled - Recent)").sum())],
         ["Active - Unscheduled, Historic (has runs, no recent jobs)", int(metadata["activity_status"].eq("Active (Unscheduled - Historic)").sum())],
         ["Active - Unscheduled, Has Jobs", int(metadata["activity_status"].eq("Active (Unscheduled - Has Jobs)").sum())],

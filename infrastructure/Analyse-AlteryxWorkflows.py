@@ -222,10 +222,18 @@ def parse_workflow(xml_path, is_macro=False):
 
 
 def find_yxmd_files(source_dir):
-    """Find all .yxmd files, extracting from .yxzp archives if needed."""
+    """Find all workflow files, extracting from .yxzp archives if needed."""
     source = Path(source_dir)
-    yxmd_files = list(source.rglob("*.yxmd"))
-    yxmc_files = list(source.rglob("*.yxmc"))
+    workflow_exts = ["*.yxmd", "*.yxwz", "*.yxwg"]
+    macro_exts = ["*.yxmc"]
+
+    workflow_files = []
+    for ext in workflow_exts:
+        workflow_files.extend(source.rglob(ext))
+
+    yxmc_files = []
+    for ext in macro_exts:
+        yxmc_files.extend(source.rglob(ext))
 
     temp_dirs = []
     for yxzp in source.rglob("*.yxzp"):
@@ -234,12 +242,14 @@ def find_yxmd_files(source_dir):
         try:
             with zipfile.ZipFile(str(yxzp), "r") as zf:
                 zf.extractall(tmp)
-            yxmd_files.extend(Path(tmp).rglob("*.yxmd"))
-            yxmc_files.extend(Path(tmp).rglob("*.yxmc"))
+            for ext in workflow_exts:
+                workflow_files.extend(Path(tmp).rglob(ext))
+            for ext in macro_exts:
+                yxmc_files.extend(Path(tmp).rglob(ext))
         except Exception as e:
             print(f"  WARN: Could not extract {yxzp.name}: {e}")
 
-    return yxmd_files, yxmc_files, temp_dirs
+    return workflow_files, yxmc_files, temp_dirs
 
 
 def build_report(results, output_path):
@@ -477,12 +487,12 @@ def main():
         sys.exit(1)
 
     print(f"Scanning: {source_dir}")
-    yxmd_files, yxmc_files, temp_dirs = find_yxmd_files(source_dir)
-    print(f"Found {len(yxmd_files)} .yxmd files, {len(yxmc_files)} .yxmc macros")
+    workflow_files, yxmc_files, temp_dirs = find_yxmd_files(source_dir)
+    print(f"Found {len(workflow_files)} workflow files (.yxmd/.yxwz/.yxwg), {len(yxmc_files)} macros (.yxmc)")
 
     results = []
-    for i, f in enumerate(yxmd_files, 1):
-        print(f"  [{i}/{len(yxmd_files)}] Parsing: {f.name}")
+    for i, f in enumerate(workflow_files, 1):
+        print(f"  [{i}/{len(workflow_files)}] Parsing: {f.name}")
         r = parse_workflow(f)
         results.append(r)
 
