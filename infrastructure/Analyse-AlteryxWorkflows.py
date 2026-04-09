@@ -116,12 +116,13 @@ def classify_plugin(plugin_str):
     return short
 
 
-def classify_tier(tools_used, has_macros, is_macro=False):
+def classify_tier(tools_used, has_macros, is_macro=False, has_questions=False):
     tool_set = set(tools_used)
     if tool_set & SPATIAL_TOOLS or tool_set & PREDICTIVE_TOOLS:
         return "Tier 3 - Predictive/Spatial/Code"
-    # Macros inherently have interface elements — don't count those as self-service
-    if not is_macro and tool_set & INTERFACE_TOOLS:
+    # Only classify as Tier 4 if the workflow has a genuine Questions interface
+    # (not just interface tools inherited from macros)
+    if not is_macro and has_questions:
         return "Tier 4 - Self-Service/Interface"
     if tool_set & ORCHESTRATION_TOOLS or has_macros:
         return "Tier 2 - Transform & Orchestrate"
@@ -142,6 +143,7 @@ def parse_workflow(xml_path, is_macro=False):
         "macros": [],
         "containers": [],
         "credentials": [],
+        "has_questions": False,
         "tier": "",
         "errors": [],
     }
@@ -163,6 +165,15 @@ def parse_workflow(xml_path, is_macro=False):
 
     if not result["name"]:
         result["name"] = Path(xml_path).stem
+
+    # Detect genuine analytic app — has a top-level <Questions> section
+    # This means users see an interface (dropdowns, text boxes, etc.) when running from Gallery
+    questions = root.find(".//Questions")
+    if questions is not None:
+        # Check it actually has question children, not just an empty tag
+        question_children = questions.findall(".//*")
+        if len(question_children) > 0:
+            result["has_questions"] = True
 
     # Parse all nodes
     nodes = root.findall(".//Node")
@@ -216,7 +227,7 @@ def parse_workflow(xml_path, is_macro=False):
     result["credentials"] = list(set(result["credentials"]))
 
     # Classify tier
-    result["tier"] = classify_tier(list(result["tools"].keys()), len(result["macros"]) > 0, is_macro)
+    result["tier"] = classify_tier(list(result["tools"].keys()), len(result["macros"]) > 0, is_macro, result["has_questions"])
 
     return result
 
@@ -333,7 +344,7 @@ def build_report(results, output_path):
 
     # ── Sheet 2: Workflow Inventory ───────────────────────────────────────
     ws2 = wb.create_sheet("Workflow Inventory")
-    headers = ["Workflow Name", "Tier", "Tool Count", "Tools Used",
+    headers = ["Workflow Name", "Tier", "Analytic App", "Tool Count", "Tools Used",
                "Data Connections", "Credentials", "Macros", "SQL Query Count",
                "Containers", "Version", "Errors"]
 
@@ -347,6 +358,7 @@ def build_report(results, output_path):
         row_data = [
             r["name"],
             r["tier"],
+            "Yes" if r.get("has_questions") else "No",
             r["tool_count"],
             ", ".join(f"{k}({v})" for k, v in r["tools"].most_common()),
             "\n".join(r["connections"]) if r["connections"] else "",
@@ -365,7 +377,7 @@ def build_report(results, output_path):
                 cell.fill = tier_fills[val]
 
     ws2.auto_filter.ref = f"A1:{get_column_letter(len(headers))}1"
-    for col_idx, w in enumerate([40, 35, 12, 60, 40, 20, 35, 14, 40, 10, 30], 1):
+    for col_idx, w in enumerate([40, 35, 14, 12, 60, 40, 20, 35, 14, 40, 10, 30], 1):
         ws2.column_dimensions[get_column_letter(col_idx)].width = w
 
     # ── Sheet 3: Tool Usage Across All Workflows ──────────────────────────
