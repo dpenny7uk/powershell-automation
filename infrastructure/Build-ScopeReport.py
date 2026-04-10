@@ -91,9 +91,11 @@ def main():
         if row["is_scheduled"]:
             return "Scheduled"
         elif row["is_active_unscheduled"]:
-            # Sub-classify by recency
-            if pd.notna(row["lastJobDate_parsed"]) and row["lastJobDate_parsed"] >= pd.Timestamp("2024-01-01"):
+            # Sub-classify by recency — 2025 cutoff
+            if pd.notna(row["lastJobDate_parsed"]) and row["lastJobDate_parsed"] >= pd.Timestamp("2025-01-01"):
                 return "Active (Unscheduled - Recent)"
+            elif pd.notna(row["lastJobDate_parsed"]) and row["lastJobDate_parsed"] < pd.Timestamp("2025-01-01"):
+                return "Active (Unscheduled - Historic)"
             elif row["runCount"] > 0:
                 return "Active (Unscheduled - Historic)"
             else:
@@ -233,7 +235,7 @@ def main():
         ["Scheduled (must migrate)", int(metadata["activity_status"].eq("Scheduled").sum())],
         ["  of which: enabled schedules", int(len(scheduled_ids))],
         ["  of which: disabled schedule only", int(len(disabled_ids))],
-        ["Active - Unscheduled, Recent (ran since 2024)", int(metadata["activity_status"].eq("Active (Unscheduled - Recent)").sum())],
+        ["Active - Unscheduled, Recent (ran since 2025)", int(metadata["activity_status"].eq("Active (Unscheduled - Recent)").sum())],
         ["Active - Unscheduled, Historic (has runs, no recent jobs)", int(metadata["activity_status"].eq("Active (Unscheduled - Historic)").sum())],
         ["Active - Unscheduled, Has Jobs", int(metadata["activity_status"].eq("Active (Unscheduled - Has Jobs)").sum())],
         ["Inactive (no runs, no jobs, no schedule)", int(metadata["activity_status"].eq("Inactive").sum())],
