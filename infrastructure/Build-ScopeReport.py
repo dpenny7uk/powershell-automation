@@ -12,11 +12,16 @@ Expects these files in the directory:
     - workflow_metadata.csv  (from Get-AlteryxMetadata.ps1)
     - migration_report.xlsx  (from Analyse-AlteryxWorkflows.py)
 
+Optional:
+    - users.csv              (from Export-AlteryxUsers.ps1 — resolves owner names)
+    - collections.csv        (from Export-AlteryxCollections.ps1 — adds team/business grouping)
+
 Output:
     - scoped_migration_report.xlsx
 """
 
 import sys, os
+from collections import defaultdict
 import pandas as pd
 from openpyxl import Workbook
 from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
@@ -31,6 +36,7 @@ def main():
     sched_path = os.path.join(base, "schedules.csv")
     meta_path = os.path.join(base, "workflow_metadata.csv")
     report_path = os.path.join(base, "migration_report.xlsx")
+    users_path = os.path.join(base, "users.csv")
     output_path = os.path.join(base, "scoped_migration_report.xlsx")
 
     for f, label in [(sched_path, "schedules.csv"), (meta_path, "workflow_metadata.csv"), (report_path, "migration_report.xlsx")]:
@@ -48,6 +54,37 @@ def main():
     print("Loading migration report...")
     inventory = pd.read_excel(report_path, sheet_name="Workflow Inventory")
     tool_usage = pd.read_excel(report_path, sheet_name="Tool Usage")
+
+    # ── Load users (optional) ─────────────────────────────────────────────
+    user_lookup = {}
+    if os.path.exists(users_path):
+        print("Loading users...")
+        users = pd.read_csv(users_path)
+        for _, u in users.iterrows():
+            uid = str(u.get("id", "")).strip()
+            first = str(u.get("firstName", "")).strip()
+            last = str(u.get("lastName", "")).strip()
+            email = str(u.get("email", "")).strip()
+            user_lookup[uid] = f"{first} {last} ({email})" if email and email != "nan" else f"{first} {last}"
+        print(f"  Loaded {len(user_lookup)} users")
+    else:
+        print("  users.csv not found — owner names will not be resolved")
+
+    # ── Load collections (optional) ───────────────────────────────────────
+    collections_path = os.path.join(base, "collections.csv")
+    coll_lookup = defaultdict(list)  # workflowId -> list of collection names
+    if os.path.exists(collections_path):
+        print("Loading collections...")
+        collections = pd.read_csv(collections_path)
+        for _, c in collections.iterrows():
+            wf_id = str(c.get("workflowId", "")).strip()
+            coll_name = str(c.get("collectionName", "")).strip()
+            if wf_id and wf_id != "nan" and coll_name and coll_name != "nan":
+                if coll_name not in coll_lookup[wf_id]:
+                    coll_lookup[wf_id].append(coll_name)
+        print(f"  Loaded {len(coll_lookup)} workflow-collection mappings")
+    else:
+        print("  collections.csv not found — collection names will not be included")
 
     # ── Get unique scheduled workflow IDs ─────────────────────────────────
     all_scheduled_ids = set(schedules["workflowId"].dropna().unique())
@@ -146,9 +183,24 @@ def main():
                     inv_row = inv_data
                     break
 
+        # Resolve owner from schedule data
+        owner_id = ""
+        owner_name = ""
+        sched_rows = schedules[schedules["workflowId"] == row.get("id", "")]
+        if len(sched_rows) > 0:
+            owner_id = str(sched_rows.iloc[0].get("ownerId", "")).strip()
+        if owner_id and owner_id in user_lookup:
+            owner_name = user_lookup[owner_id]
+
+        # Resolve collections
+        wf_id = str(row.get("id", "")).strip()
+        wf_collections = " | ".join(coll_lookup.get(wf_id, []))
+
         matched.append({
             "Workflow Name": wf_name,
             "Workflow ID": row.get("id", ""),
+            "Owner": owner_name,
+            "Collections": wf_collections,
             "Activity Status": row.get("activity_status", ""),
             "Date Created": row.get("dateCreated", ""),
             "Run Count": row.get("runCount", 0),
@@ -298,7 +350,7 @@ def main():
                 cell.fill = activity_fills[val]
 
     ws2.auto_filter.ref = f"A1:{get_column_letter(len(headers))}1"
-    col_widths = [35, 28, 30, 18, 12, 14, 10, 12, 14, 18, 14, 40, 20, 32, 12, 50, 35, 30, 14]
+    col_widths = [35, 28, 35, 40, 30, 18, 12, 14, 10, 12, 14, 18, 14, 40, 20, 32, 12, 50, 35, 30, 14]
     for col_idx, w in enumerate(col_widths[:len(headers)], 1):
         ws2.column_dimensions[get_column_letter(col_idx)].width = w
 
