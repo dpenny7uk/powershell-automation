@@ -46,22 +46,43 @@ foreach ($wf in $allWorkflows) {
         $detail = $null
     }
 
-    # Get last job for this workflow
+    # Count actual jobs by paginating (runCount from API is unreliable)
+    $actualRunCount = 0
     $lastJob = $null
     try {
-        $rc = if ($detail) { $detail.runCount } else { 0 }
-        $skipTo = if ($rc -gt 1) { $rc - 1 } else { 0 }
-        $jobs = Invoke-RestMethod -Uri "$BaseUrl/v3/workflows/$($wf.id)/jobs?skip=$skipTo&take=1" -Headers $headers -Method Get
-        if ($jobs -and $jobs.Count -gt 0) {
-            $lastJob = $jobs[-1]
+        # Get first page to check if any jobs exist
+        $firstPage = Invoke-RestMethod -Uri "$BaseUrl/v3/workflows/$($wf.id)/jobs?skip=0&take=$PageSize" -Headers $headers -Method Get
+        if ($firstPage -and $firstPage.Count -gt 0) {
+            $actualRunCount = $firstPage.Count
+
+            if ($firstPage.Count -eq $PageSize) {
+                # More pages exist — keep counting
+                $countSkip = $PageSize
+                do {
+                    $nextPage = Invoke-RestMethod -Uri "$BaseUrl/v3/workflows/$($wf.id)/jobs?skip=$countSkip&take=$PageSize" -Headers $headers -Method Get
+                    if ($nextPage -and $nextPage.Count -gt 0) {
+                        $actualRunCount += $nextPage.Count
+                        $countSkip += $PageSize
+                    } else { break }
+                    Start-Sleep -Milliseconds 150
+                } while ($nextPage.Count -eq $PageSize)
+
+                # Get the actual last job
+                $lastPage = Invoke-RestMethod -Uri "$BaseUrl/v3/workflows/$($wf.id)/jobs?skip=$($actualRunCount - 1)&take=1" -Headers $headers -Method Get
+                if ($lastPage -and $lastPage.Count -gt 0) { $lastJob = $lastPage[-1] }
+            } else {
+                # All jobs fit in one page — last job is the last element
+                $lastJob = $firstPage[-1]
+            }
         }
     } catch {}
 
     $results.Add([PSCustomObject]@{
         id                  = $wf.id
         name                = $wf.name
+        ownerId             = if ($detail) { $detail.ownerId } else { "" }
         dateCreated         = $wf.dateCreated
-        runCount            = if ($detail) { $detail.runCount } else { "" }
+        runCount            = $actualRunCount
         packageType         = if ($detail -and $detail.versions) { $detail.versions[0].packageWorkflowType } else { "" }
         fileName            = if ($detail -and $detail.details) { $detail.details.fileName } else { "" }
         published           = if ($detail -and $detail.versions) { $detail.versions[0].published } else { "" }

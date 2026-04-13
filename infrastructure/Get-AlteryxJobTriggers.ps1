@@ -1,9 +1,11 @@
-# Identify who triggered unscheduled Alteryx workflow runs
-# Cross-references job history with user directory to produce an audit trail
+# Audit unscheduled Alteryx workflows with recent activity (2025+)
+# Captures job history and workflow creator (ownerId) for ownership assignment
+# Note: the Alteryx Server API does not expose who triggered individual jobs,
+#       so we use ownerId as "Created By" — the person who published the workflow.
 #
 # Outputs:
-#   job_triggers.csv         — one row per job (who ran what, when)
-#   job_triggers_summary.csv — one row per workflow (unique triggerers, run counts)
+#   job_triggers.csv         — one row per job (workflow, creator, job date/status)
+#   job_triggers_summary.csv — one row per workflow (creator, total runs, date range)
 
 $BaseUrl      = "https://alteryx.contoso.com/webapi"
 $TokenUrl     = "https://alteryx.contoso.com/webapi/oauth2/token"
@@ -53,39 +55,43 @@ foreach ($u in $users) {
 Write-Host "Users loaded: $($userLookup.Count)"
 
 # ── Identify unscheduled workflows with recent runs (2025+) ──────────────
+# Note: runCount from the API is unreliable (often 0 for workflows that have
+# actually run). Instead, we fetch the most recent job directly and check its date.
 $ActiveSince = [datetime]"2025-01-01"
-Write-Host "`nChecking workflow run counts (filtering to runs since $($ActiveSince.ToString('yyyy-MM-dd')))..."
+Write-Host "`nChecking for recent jobs (filtering to runs since $($ActiveSince.ToString('yyyy-MM-dd')))..."
 $candidates = [System.Collections.Generic.List[object]]::new()
 $skippedHistoric = 0
+$skippedNoJobs = 0
 $i = 0
 
 foreach ($wf in $allWorkflows) {
     $i++
     if ($scheduledWorkflowIds.Contains($wf.id)) { continue }
 
+    # Fetch the most recent job directly — don't rely on runCount
+    $lastJob = $null
     try {
-        $detail = Invoke-RestMethod -Uri "$BaseUrl/v3/workflows/$($wf.id)" -Headers $headers -Method Get
-    } catch {
-        $detail = $null
-    }
+        $jobs = Invoke-RestMethod -Uri "$BaseUrl/v3/workflows/$($wf.id)/jobs?skip=0&take=1&sortField=createDateTime&direction=desc" -Headers $headers -Method Get
+        if ($jobs -and $jobs.Count -gt 0) { $lastJob = $jobs[0] }
+    } catch {}
 
-    $rc = if ($detail) { $detail.runCount } else { 0 }
-    if ($rc -gt 0) {
-        # Check last job date — only include if most recent run is 2025+
-        $lastJob = $null
-        try {
-            $skipTo = if ($rc -gt 1) { $rc - 1 } else { 0 }
-            $jobs = Invoke-RestMethod -Uri "$BaseUrl/v3/workflows/$($wf.id)/jobs?skip=$skipTo&take=1" -Headers $headers -Method Get
-            if ($jobs -and $jobs.Count -gt 0) { $lastJob = $jobs[-1] }
-        } catch {}
-
-        $lastJobDate = if ($lastJob -and $lastJob.createDate) { [datetime]$lastJob.createDate } else { $null }
+    if (-not $lastJob) {
+        $skippedNoJobs++
+    } else {
+        $lastJobDate = if ($lastJob.createDateTime) { [datetime]$lastJob.createDateTime } elseif ($lastJob.createDate) { [datetime]$lastJob.createDate } else { $null }
 
         if ($lastJobDate -and $lastJobDate -ge $ActiveSince) {
+            # Get ownerId from workflow detail
+            $ownerId = ""
+            try {
+                $detail = Invoke-RestMethod -Uri "$BaseUrl/v3/workflows/$($wf.id)" -Headers $headers -Method Get
+                $ownerId = if ($detail) { $detail.ownerId } else { "" }
+            } catch {}
+
             $candidates.Add([PSCustomObject]@{
                 id       = $wf.id
                 name     = $wf.name
-                runCount = $rc
+                ownerId  = $ownerId
             })
         } else {
             $skippedHistoric++
@@ -93,7 +99,7 @@ foreach ($wf in $allWorkflows) {
     }
 
     if ($i % 50 -eq 0) {
-        Write-Host "  Checked $i/$($allWorkflows.Count) — found $($candidates.Count) recent, skipped $skippedHistoric historic"
+        Write-Host "  Checked $i/$($allWorkflows.Count) — found $($candidates.Count) recent, skipped $skippedHistoric historic, $skippedNoJobs no jobs"
     }
 
     Start-Sleep -Milliseconds 150
@@ -101,14 +107,20 @@ foreach ($wf in $allWorkflows) {
 
 Write-Host "`nUnscheduled workflows with recent runs (2025+): $($candidates.Count)"
 Write-Host "Skipped (last run before 2025): $skippedHistoric"
+Write-Host "Skipped (no jobs at all): $skippedNoJobs"
 
 # ── Fetch full job history for each candidate ────────────────────────────
+# Note: the Alteryx Server API does not expose who triggered each job.
+# We capture job details + the workflow ownerId (who published it) as "Created By".
 $results = [System.Collections.Generic.List[object]]::new()
 $wfIndex = 0
 
 foreach ($wf in $candidates) {
     $wfIndex++
-    Write-Host "  [$wfIndex/$($candidates.Count)] $($wf.name) ($($wf.runCount) runs)" -ForegroundColor Gray
+    Write-Host "  [$wfIndex/$($candidates.Count)] $($wf.name)" -ForegroundColor Gray
+
+    # Resolve workflow owner
+    $owner = if ($wf.ownerId) { $userLookup[$wf.ownerId] } else { $null }
 
     $skip = 0
     do {
@@ -122,16 +134,16 @@ foreach ($wf in $candidates) {
         if (-not $jobs -or $jobs.Count -eq 0) { break }
 
         foreach ($job in $jobs) {
-            $user = if ($job.userId) { $userLookup[$job.userId] } else { $null }
+            $jobDate = if ($job.createDateTime) { $job.createDateTime } elseif ($job.createDate) { $job.createDate } else { "" }
             $results.Add([PSCustomObject]@{
-                workflowId        = $wf.id
-                workflowName      = $wf.name
-                jobId             = $job.id
-                jobDate           = $job.createDate
-                jobStatus         = $job.status
-                triggeredByUserId = if ($job.userId) { $job.userId } else { "" }
-                triggeredByName   = if ($user) { "$($user.firstName) $($user.lastName)" } else { "Unknown" }
-                triggeredByEmail  = if ($user) { $user.email } else { "" }
+                workflowId      = $wf.id
+                workflowName    = $wf.name
+                createdByUserId = if ($wf.ownerId) { $wf.ownerId } else { "" }
+                createdByName   = if ($owner) { "$($owner.firstName) $($owner.lastName)" } else { "Unknown" }
+                createdByEmail  = if ($owner) { $owner.email } else { "" }
+                jobId           = $job.id
+                jobDate         = $jobDate
+                jobStatus       = $job.status
             })
         }
 
@@ -147,36 +159,27 @@ $results | Export-Csv -Path $OutputCsv -NoTypeInformation -Encoding UTF8
 $summary = $results | Group-Object workflowId | ForEach-Object {
     $group = $_.Group
 
-    # Find the user who triggered the most runs
-    $topTriggerer = $group |
-        Where-Object { $_.triggeredByName -ne "Unknown" } |
-        Group-Object triggeredByName |
-        Sort-Object Count -Descending |
-        Select-Object -First 1
-
     [PSCustomObject]@{
-        workflowId       = $_.Name
-        workflowName     = $group[0].workflowName
-        totalRuns        = $group.Count
-        uniqueTriggerers = ($group | Select-Object triggeredByUserId -Unique).Count
-        triggererNames   = ($group | Select-Object triggeredByName -Unique | ForEach-Object { $_.triggeredByName }) -join " | "
-        triggererEmails  = ($group | Where-Object { $_.triggeredByEmail } | Select-Object triggeredByEmail -Unique | ForEach-Object { $_.triggeredByEmail }) -join " | "
-        mostLikelyOwner  = if ($topTriggerer) { "$($topTriggerer.Name) ($($topTriggerer.Count) runs)" } else { "Unknown" }
-        firstRunDate     = ($group | Sort-Object jobDate | Select-Object -First 1).jobDate
-        lastRunDate      = ($group | Sort-Object jobDate -Descending | Select-Object -First 1).jobDate
+        workflowId     = $_.Name
+        workflowName   = $group[0].workflowName
+        createdByName  = $group[0].createdByName
+        createdByEmail = $group[0].createdByEmail
+        totalRuns      = $group.Count
+        firstRunDate   = ($group | Sort-Object jobDate | Select-Object -First 1).jobDate
+        lastRunDate    = ($group | Sort-Object jobDate -Descending | Select-Object -First 1).jobDate
     }
 }
 
 $summary | Export-Csv -Path $SummaryCsv -NoTypeInformation -Encoding UTF8
 
 # ── Console summary ──────────────────────────────────────────────────────
-$uniqueUsers = ($results | Where-Object { $_.triggeredByName -ne "Unknown" } | Select-Object triggeredByUserId -Unique).Count
+$knownOwners = ($results | Where-Object { $_.createdByName -ne "Unknown" } | Select-Object createdByUserId -Unique).Count
 
-Write-Host "`n── Job Trigger Summary ──" -ForegroundColor Cyan
+Write-Host "`n── Unscheduled Workflow Summary ──" -ForegroundColor Cyan
 Write-Host "  Total workflows in gallery:      $($allWorkflows.Count)"
 Write-Host "  Scheduled workflows (excluded):   $($scheduledWorkflowIds.Count)"
-Write-Host "  Unscheduled with runs:            $($candidates.Count)"
+Write-Host "  Unscheduled with recent runs:     $($candidates.Count)"
 Write-Host "  Total jobs found:                 $($results.Count)"
-Write-Host "  Unique users who triggered runs:  $uniqueUsers"
+Write-Host "  Workflows with known creator:     $knownOwners"
 Write-Host "`nDetailed export: $OutputCsv" -ForegroundColor Green
 Write-Host "Summary export:  $SummaryCsv" -ForegroundColor Green

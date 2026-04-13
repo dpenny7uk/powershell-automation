@@ -100,10 +100,9 @@ def main():
             wf_id = str(t.get("workflowId", "")).strip()
             if wf_id and wf_id != "nan":
                 trigger_lookup[wf_id] = {
-                    "triggererNames": str(t.get("triggererNames", "")),
+                    "createdByName": str(t.get("createdByName", "")),
+                    "createdByEmail": str(t.get("createdByEmail", "")),
                     "totalRuns": int(t.get("totalRuns", 0)),
-                    "mostLikelyOwner": str(t.get("mostLikelyOwner", "")),
-                    "uniqueTriggerers": int(t.get("uniqueTriggerers", 0)),
                 }
         print(f"  Loaded trigger summaries for {len(trigger_lookup)} workflows")
     else:
@@ -245,9 +244,9 @@ def main():
             "Schedule Count": row.get("schedule_count", 0) if pd.notna(row.get("schedule_count")) else 0,
             "Schedule Names": row.get("schedule_names", "") if pd.notna(row.get("schedule_names")) else "",
             "Next Scheduled Run": row.get("next_run", "") if pd.notna(row.get("next_run")) else "",
-            "Triggered By": trig.get("triggererNames", ""),
-            "Trigger Count": trig.get("totalRuns", ""),
-            "Most Likely Owner": trig.get("mostLikelyOwner", ""),
+            "Created By": trig.get("createdByName", ""),
+            "Creator Email": trig.get("createdByEmail", ""),
+            "Total Runs": trig.get("totalRuns", ""),
             "Tier": inv_row["Tier"] if inv_row is not None else "Not in analysis",
             "Tool Count": inv_row["Tool Count"] if inv_row is not None else "",
             "Tools Used": inv_row["Tools Used"] if inv_row is not None else "",
@@ -445,12 +444,12 @@ def main():
     for col_idx in range(1, len(sched_headers) + 1):
         ws4.column_dimensions[get_column_letter(col_idx)].width = 30
 
-    # ── Sheet 5: Triggerers (if job_triggers.csv is available) ────────────
+    # ── Sheet 5: Job Activity (if job_triggers.csv is available) ────────────
     if trigger_detail is not None and len(trigger_detail) > 0:
-        ws5 = wb.create_sheet("Triggerers")
+        ws5 = wb.create_sheet("Job Activity")
 
-        # Build per-workflow-per-user aggregation
-        trig_agg = trigger_detail.groupby(["workflowId", "workflowName", "triggeredByName", "triggeredByEmail"]).agg(
+        # Build per-workflow aggregation with creator info
+        trig_agg = trigger_detail.groupby(["workflowId", "workflowName", "createdByName", "createdByEmail"]).agg(
             runCount=("jobId", "count"),
             firstRun=("jobDate", "min"),
             lastRun=("jobDate", "max"),
@@ -459,8 +458,8 @@ def main():
         trig_agg = trig_agg.rename(columns={
             "workflowName": "Workflow Name",
             "workflowId": "Workflow ID",
-            "triggeredByName": "Triggerer Name",
-            "triggeredByEmail": "Triggerer Email",
+            "createdByName": "Created By",
+            "createdByEmail": "Creator Email",
             "runCount": "Run Count",
             "firstRun": "First Run",
             "lastRun": "Last Run",
@@ -493,18 +492,18 @@ def main():
         ws = wb["Summary"]
         last_row = ws.max_row + 2
 
-        unscheduled_with_triggers = sum(1 for wf_id, t in trigger_lookup.items() if t.get("triggererNames", "") and t["triggererNames"] != "nan")
+        with_creator = sum(1 for t in trigger_lookup.values() if t.get("createdByName", "") and t["createdByName"] not in ("nan", "Unknown", ""))
         unscheduled_meta = metadata[metadata["activity_status"] != "Scheduled"]
-        unscheduled_no_triggers = len(unscheduled_meta[~unscheduled_meta["id"].isin(trigger_lookup.keys())])
-        unique_triggerers = set()
+        without_creator = len(unscheduled_meta[~unscheduled_meta["id"].isin(trigger_lookup.keys())])
+        unique_creators = set()
         if trigger_detail is not None:
-            unique_triggerers = set(trigger_detail[trigger_detail["triggeredByName"] != "Unknown"]["triggeredByName"].dropna().unique())
+            unique_creators = set(trigger_detail[trigger_detail["createdByName"] != "Unknown"]["createdByName"].dropna().unique())
 
         trigger_stats = [
-            ["Trigger Analysis (Unscheduled Workflows)", ""],
-            ["Unscheduled workflows with identified triggerers", unscheduled_with_triggers],
-            ["Unscheduled workflows with no identified triggerer", unscheduled_no_triggers],
-            ["Unique users triggering unscheduled workflows", len(unique_triggerers)],
+            ["Ownership Analysis (Unscheduled Workflows)", ""],
+            ["Unscheduled workflows with known creator", with_creator],
+            ["Unscheduled workflows with no known creator", without_creator],
+            ["Unique creators of unscheduled workflows", len(unique_creators)],
         ]
 
         for i, row_data in enumerate(trigger_stats):
