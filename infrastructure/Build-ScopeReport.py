@@ -15,6 +15,8 @@ Expects these files in the directory:
 Optional:
     - users.csv              (from Export-AlteryxUsers.ps1 — resolves owner names)
     - collections.csv        (from Export-AlteryxCollections.ps1 — adds team/business grouping)
+    - job_triggers.csv       (from Get-AlteryxJobTriggers.ps1 — adds Triggerers sheet)
+    - job_triggers_summary.csv (from Get-AlteryxJobTriggers.ps1 — adds trigger columns & stats)
 
 Output:
     - scoped_migration_report.xlsx
@@ -37,6 +39,8 @@ def main():
     meta_path = os.path.join(base, "workflow_metadata.csv")
     report_path = os.path.join(base, "migration_report.xlsx")
     users_path = os.path.join(base, "users.csv")
+    triggers_path = os.path.join(base, "job_triggers.csv")
+    triggers_summary_path = os.path.join(base, "job_triggers_summary.csv")
     output_path = os.path.join(base, "scoped_migration_report.xlsx")
 
     for f, label in [(sched_path, "schedules.csv"), (meta_path, "workflow_metadata.csv"), (report_path, "migration_report.xlsx")]:
@@ -85,6 +89,32 @@ def main():
         print(f"  Loaded {len(coll_lookup)} workflow-collection mappings")
     else:
         print("  collections.csv not found — collection names will not be included")
+
+    # ── Load job triggers (optional) ─────────────────────────────────────
+    trigger_lookup = {}       # workflowId -> summary row dict
+    trigger_detail = None     # full DataFrame for Triggerers sheet
+    if os.path.exists(triggers_summary_path):
+        print("Loading job triggers summary...")
+        trig_summary = pd.read_csv(triggers_summary_path)
+        for _, t in trig_summary.iterrows():
+            wf_id = str(t.get("workflowId", "")).strip()
+            if wf_id and wf_id != "nan":
+                trigger_lookup[wf_id] = {
+                    "triggererNames": str(t.get("triggererNames", "")),
+                    "totalRuns": int(t.get("totalRuns", 0)),
+                    "mostLikelyOwner": str(t.get("mostLikelyOwner", "")),
+                    "uniqueTriggerers": int(t.get("uniqueTriggerers", 0)),
+                }
+        print(f"  Loaded trigger summaries for {len(trigger_lookup)} workflows")
+    else:
+        print("  job_triggers_summary.csv not found — trigger data will not be included")
+
+    if os.path.exists(triggers_path):
+        print("Loading job triggers detail...")
+        trigger_detail = pd.read_csv(triggers_path)
+        print(f"  Loaded {len(trigger_detail)} job trigger records")
+    else:
+        print("  job_triggers.csv not found — Triggerers sheet will not be generated")
 
     # ── Get unique scheduled workflow IDs ─────────────────────────────────
     all_scheduled_ids = set(schedules["workflowId"].dropna().unique())
@@ -196,6 +226,9 @@ def main():
         wf_id = str(row.get("id", "")).strip()
         wf_collections = " | ".join(coll_lookup.get(wf_id, []))
 
+        # Resolve trigger data
+        trig = trigger_lookup.get(wf_id, {})
+
         matched.append({
             "Workflow Name": wf_name,
             "Workflow ID": row.get("id", ""),
@@ -212,6 +245,9 @@ def main():
             "Schedule Count": row.get("schedule_count", 0) if pd.notna(row.get("schedule_count")) else 0,
             "Schedule Names": row.get("schedule_names", "") if pd.notna(row.get("schedule_names")) else "",
             "Next Scheduled Run": row.get("next_run", "") if pd.notna(row.get("next_run")) else "",
+            "Triggered By": trig.get("triggererNames", ""),
+            "Trigger Count": trig.get("totalRuns", ""),
+            "Most Likely Owner": trig.get("mostLikelyOwner", ""),
             "Tier": inv_row["Tier"] if inv_row is not None else "Not in analysis",
             "Tool Count": inv_row["Tool Count"] if inv_row is not None else "",
             "Tools Used": inv_row["Tools Used"] if inv_row is not None else "",
@@ -281,16 +317,32 @@ def main():
     summary_rows = [
         ["Alteryx Migration - Scoped Active Workflows", ""],
         ["", ""],
+        ["What This Report Shows", ""],
+        ["This report is a full inventory of all workflows on the Alteryx Server,", ""],
+        ["classified by usage to support migration planning.", ""],
+        ["", ""],
+        ["Scheduled = workflows running automatically on a timer (must migrate).", ""],
+        ["Unscheduled = workflows run manually by users or via the API.", ""],
+        ["Inactive = workflows never run or not run in a long time with no schedule.", ""],
+        ["", ""],
+        ["Tiers describe workflow complexity and determine which platform to migrate to.", ""],
+        ["In Scope = everything that is actively used (Scheduled + Unscheduled).", ""],
+        ["", ""],
+        ["Action needed: assign owners to unscheduled workflows, agree target", ""],
+        ["platform per tier, and prioritise scheduled workflows for migration.", ""],
+        ["", ""],
         ["Total Workflows in Gallery", len(metadata)],
         ["", ""],
         ["Activity Classification", "Count"],
         ["Scheduled (must migrate)", int(metadata["activity_status"].eq("Scheduled").sum())],
-        ["  of which: enabled schedules", int(len(scheduled_ids))],
-        ["  of which: disabled schedule only", int(len(disabled_ids))],
         ["Active - Unscheduled, Recent (ran since 2025)", int(metadata["activity_status"].eq("Active (Unscheduled - Recent)").sum())],
         ["Active - Unscheduled, Historic (has runs, no recent jobs)", int(metadata["activity_status"].eq("Active (Unscheduled - Historic)").sum())],
         ["Active - Unscheduled, Has Jobs", int(metadata["activity_status"].eq("Active (Unscheduled - Has Jobs)").sum())],
         ["Inactive (no runs, no jobs, no schedule)", int(metadata["activity_status"].eq("Inactive").sum())],
+        ["", ""],
+        ["Note: disabled schedules", int(len(disabled_ids))],
+        ["(These workflows have schedules that are turned off. They are counted", ""],
+        ["in the Unscheduled or Inactive categories above, not as Scheduled.)", ""],
         ["", ""],
         ["Total In Scope (all active)", len(df)],
         ["Workflows Matched to Analysis", len(df) - len(unmatched_names)],
@@ -313,13 +365,19 @@ def main():
         ["Not in analysis", "Review manually - .yxzp not in export or name mismatch"],
     ]
 
+    # Rows that should get header styling (dark blue background, white text)
+    header_labels = {
+        "Activity Classification", "Active Workflow Tier Breakdown", "Platform Recommendation",
+        "What This Report Shows",
+    }
+
     for row_idx, row_data in enumerate(summary_rows, 1):
         for col_idx, val in enumerate(row_data, 1):
             cell = ws.cell(row=row_idx, column=col_idx, value=val)
             cell.border = thin_border
             if row_idx == 1:
                 cell.font = Font(bold=True, size=14)
-            elif row_idx == 8 or row_idx == len(summary_rows) - 6:
+            elif row_data[0] in header_labels:
                 cell.font = header_font
                 cell.fill = header_fill
 
@@ -350,7 +408,7 @@ def main():
                 cell.fill = activity_fills[val]
 
     ws2.auto_filter.ref = f"A1:{get_column_letter(len(headers))}1"
-    col_widths = [35, 28, 35, 40, 30, 18, 12, 14, 10, 12, 14, 18, 14, 40, 20, 32, 12, 50, 35, 30, 14]
+    col_widths = [35, 28, 35, 40, 30, 18, 12, 14, 10, 12, 14, 18, 14, 40, 20, 40, 12, 30, 32, 12, 50, 35, 30, 14]
     for col_idx, w in enumerate(col_widths[:len(headers)], 1):
         ws2.column_dimensions[get_column_letter(col_idx)].width = w
 
@@ -386,6 +444,76 @@ def main():
 
     for col_idx in range(1, len(sched_headers) + 1):
         ws4.column_dimensions[get_column_letter(col_idx)].width = 30
+
+    # ── Sheet 5: Triggerers (if job_triggers.csv is available) ────────────
+    if trigger_detail is not None and len(trigger_detail) > 0:
+        ws5 = wb.create_sheet("Triggerers")
+
+        # Build per-workflow-per-user aggregation
+        trig_agg = trigger_detail.groupby(["workflowId", "workflowName", "triggeredByName", "triggeredByEmail"]).agg(
+            runCount=("jobId", "count"),
+            firstRun=("jobDate", "min"),
+            lastRun=("jobDate", "max"),
+        ).reset_index()
+        trig_agg = trig_agg.sort_values(["workflowName", "runCount"], ascending=[True, False])
+        trig_agg = trig_agg.rename(columns={
+            "workflowName": "Workflow Name",
+            "workflowId": "Workflow ID",
+            "triggeredByName": "Triggerer Name",
+            "triggeredByEmail": "Triggerer Email",
+            "runCount": "Run Count",
+            "firstRun": "First Run",
+            "lastRun": "Last Run",
+        })
+
+        trig_headers = list(trig_agg.columns)
+        for col_idx, h in enumerate(trig_headers, 1):
+            cell = ws5.cell(row=1, column=col_idx, value=h)
+            cell.font = header_font
+            cell.fill = header_fill
+            cell.border = thin_border
+
+        for row_idx, (_, row) in enumerate(trig_agg.iterrows(), 2):
+            for col_idx, h in enumerate(trig_headers, 1):
+                val = row[h]
+                if pd.isna(val):
+                    val = ""
+                cell = ws5.cell(row=row_idx, column=col_idx, value=val)
+                cell.border = thin_border
+
+        trig_col_widths = [35, 28, 30, 35, 12, 20, 20]
+        for col_idx, w in enumerate(trig_col_widths[:len(trig_headers)], 1):
+            ws5.column_dimensions[get_column_letter(col_idx)].width = w
+
+        ws5.auto_filter.ref = f"A1:{get_column_letter(len(trig_headers))}1"
+
+    # ── Add trigger stats to summary sheet (if available) ─────────────────
+    if trigger_lookup:
+        # Find the summary sheet and append trigger stats at the bottom
+        ws = wb["Summary"]
+        last_row = ws.max_row + 2
+
+        unscheduled_with_triggers = sum(1 for wf_id, t in trigger_lookup.items() if t.get("triggererNames", "") and t["triggererNames"] != "nan")
+        unscheduled_meta = metadata[metadata["activity_status"] != "Scheduled"]
+        unscheduled_no_triggers = len(unscheduled_meta[~unscheduled_meta["id"].isin(trigger_lookup.keys())])
+        unique_triggerers = set()
+        if trigger_detail is not None:
+            unique_triggerers = set(trigger_detail[trigger_detail["triggeredByName"] != "Unknown"]["triggeredByName"].dropna().unique())
+
+        trigger_stats = [
+            ["Trigger Analysis (Unscheduled Workflows)", ""],
+            ["Unscheduled workflows with identified triggerers", unscheduled_with_triggers],
+            ["Unscheduled workflows with no identified triggerer", unscheduled_no_triggers],
+            ["Unique users triggering unscheduled workflows", len(unique_triggerers)],
+        ]
+
+        for i, row_data in enumerate(trigger_stats):
+            for col_idx, val in enumerate(row_data, 1):
+                cell = ws.cell(row=last_row + i, column=col_idx, value=val)
+                cell.border = thin_border
+                if i == 0:
+                    cell.font = header_font
+                    cell.fill = header_fill
 
     wb.save(output_path)
     print(f"\nScoped report saved: {output_path}")
