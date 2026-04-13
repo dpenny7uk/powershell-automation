@@ -52,9 +52,11 @@ foreach ($u in $users) {
 }
 Write-Host "Users loaded: $($userLookup.Count)"
 
-# ── Identify unscheduled workflows with runs ─────────────────────────────
-Write-Host "`nChecking workflow run counts..."
+# ── Identify unscheduled workflows with recent runs (2025+) ──────────────
+$ActiveSince = [datetime]"2025-01-01"
+Write-Host "`nChecking workflow run counts (filtering to runs since $($ActiveSince.ToString('yyyy-MM-dd')))..."
 $candidates = [System.Collections.Generic.List[object]]::new()
+$skippedHistoric = 0
 $i = 0
 
 foreach ($wf in $allWorkflows) {
@@ -69,21 +71,36 @@ foreach ($wf in $allWorkflows) {
 
     $rc = if ($detail) { $detail.runCount } else { 0 }
     if ($rc -gt 0) {
-        $candidates.Add([PSCustomObject]@{
-            id       = $wf.id
-            name     = $wf.name
-            runCount = $rc
-        })
+        # Check last job date — only include if most recent run is 2025+
+        $lastJob = $null
+        try {
+            $skipTo = if ($rc -gt 1) { $rc - 1 } else { 0 }
+            $jobs = Invoke-RestMethod -Uri "$BaseUrl/v3/workflows/$($wf.id)/jobs?skip=$skipTo&take=1" -Headers $headers -Method Get
+            if ($jobs -and $jobs.Count -gt 0) { $lastJob = $jobs[-1] }
+        } catch {}
+
+        $lastJobDate = if ($lastJob -and $lastJob.createDate) { [datetime]$lastJob.createDate } else { $null }
+
+        if ($lastJobDate -and $lastJobDate -ge $ActiveSince) {
+            $candidates.Add([PSCustomObject]@{
+                id       = $wf.id
+                name     = $wf.name
+                runCount = $rc
+            })
+        } else {
+            $skippedHistoric++
+        }
     }
 
     if ($i % 50 -eq 0) {
-        Write-Host "  Checked $i/$($allWorkflows.Count) — found $($candidates.Count) unscheduled with runs"
+        Write-Host "  Checked $i/$($allWorkflows.Count) — found $($candidates.Count) recent, skipped $skippedHistoric historic"
     }
 
     Start-Sleep -Milliseconds 150
 }
 
-Write-Host "`nUnscheduled workflows with runs: $($candidates.Count)"
+Write-Host "`nUnscheduled workflows with recent runs (2025+): $($candidates.Count)"
+Write-Host "Skipped (last run before 2025): $skippedHistoric"
 
 # ── Fetch full job history for each candidate ────────────────────────────
 $results = [System.Collections.Generic.List[object]]::new()
