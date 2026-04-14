@@ -1,22 +1,24 @@
 # Export Alteryx Server Schedules
 
-$BaseUrl      = "https://alteryx.contoso.com/webapi"
-$TokenUrl     = "https://alteryx.contoso.com/webapi/oauth2/token"
-$ClientId     = "YOUR_CLIENT_ID"
-$ClientSecret = "YOUR_CLIENT_SECRET"
 $OutputCsv    = "C:\Dev\AlteryxExport\schedules.csv"
+$PageSize     = 100
 
 # Authenticate
-$tokenBody = @{
-    grant_type    = "client_credentials"
-    client_id     = $ClientId
-    client_secret = $ClientSecret
-}
-$tokenResponse = Invoke-RestMethod -Uri $TokenUrl -Method Post -Body $tokenBody -ContentType "application/x-www-form-urlencoded"
-$headers = @{ "Authorization" = "Bearer $($tokenResponse.access_token)" }
+. "$PSScriptRoot\Get-AlteryxAuth.ps1"
+$auth    = Get-AlteryxAuth
+$headers = $auth.Headers
+$BaseUrl = $auth.BaseUrl
 
-# Get all schedules (list)
-$scheduleList = Invoke-RestMethod -Uri "$BaseUrl/v3/schedules" -Headers $headers -Method Get
+# Get all schedules (paginated)
+$scheduleList = [System.Collections.Generic.List[object]]::new()
+$skip = 0
+do {
+    $response = @(Invoke-RestMethod -Uri "$BaseUrl/v3/schedules?skip=$skip&take=$PageSize" -Headers $headers -Method Get)
+    if ($response -and $response.Count -gt 0) {
+        $scheduleList.AddRange($response)
+        $skip += $PageSize
+    } else { break }
+} while ($response.Count -eq $PageSize)
 Write-Host "Total Schedules: $($scheduleList.Count)"
 
 $unique = ($scheduleList.workflowId | Sort-Object -Unique).Count
@@ -34,6 +36,7 @@ foreach ($sched in $scheduleList) {
     try {
         $detail = Invoke-RestMethod -Uri "$BaseUrl/v3/schedules/$($sched.id)" -Headers $headers -Method Get
     } catch {
+        Write-Warning "  Failed to get detail for $($sched.name): $($_.Exception.Message)"
         $detail = $null
     }
 
@@ -44,7 +47,7 @@ foreach ($sched in $scheduleList) {
         ownerId       = $sched.ownerId
         runDateTime    = $sched.runDateTime
         timeZone      = $sched.timeZone
-        enabled       = if ($detail) { $detail.enabled } else { "" }
+        enabled       = if ($detail) { $detail.enabled } else { $null }
         state         = if ($detail) { $detail.state } else { "" }
         priority      = if ($detail) { $detail.priority } else { "" }
         frequency     = if ($detail) { $detail.frequency } else { "" }
@@ -59,8 +62,8 @@ foreach ($sched in $scheduleList) {
 }
 
 # Summary
-$enabledCount = ($results | Where-Object { $_.enabled -eq $true }).Count
-$disabledCount = ($results | Where-Object { $_.enabled -eq $false }).Count
+$enabledCount = ($results | Where-Object { $_.enabled -is [bool] -and $_.enabled -eq $true }).Count
+$disabledCount = ($results | Where-Object { $_.enabled -is [bool] -and $_.enabled -eq $false }).Count
 $activeCount = ($results | Where-Object { $_.state -eq "Active" }).Count
 
 Write-Host "`n── Schedule Summary ──" -ForegroundColor Cyan

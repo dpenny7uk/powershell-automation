@@ -1,27 +1,20 @@
 # Re-pull Alteryx workflow metadata with correct field names
 # Run from the same machine as the export script
 
-$BaseUrl      = "https://alteryx.contoso.com/webapi"
-$TokenUrl     = "https://alteryx.contoso.com/webapi/oauth2/token"
-$ClientId     = "YOUR_CLIENT_ID"
-$ClientSecret = "YOUR_CLIENT_SECRET"
 $OutputCsv    = "C:\Dev\AlteryxExport\workflow_metadata.csv"
 $PageSize     = 100
 
 # Authenticate
-$tokenBody = @{
-    grant_type    = "client_credentials"
-    client_id     = $ClientId
-    client_secret = $ClientSecret
-}
-$tokenResponse = Invoke-RestMethod -Uri $TokenUrl -Method Post -Body $tokenBody -ContentType "application/x-www-form-urlencoded"
-$headers = @{ "Authorization" = "Bearer $($tokenResponse.access_token)" }
+. "$PSScriptRoot\Get-AlteryxAuth.ps1"
+$auth    = Get-AlteryxAuth
+$headers = $auth.Headers
+$BaseUrl = $auth.BaseUrl
 
 # Get all workflows
 $allWorkflows = [System.Collections.Generic.List[object]]::new()
 $skip = 0
 do {
-    $response = Invoke-RestMethod -Uri "$BaseUrl/v3/workflows?skip=$skip&take=$PageSize" -Headers $headers -Method Get
+    $response = @(Invoke-RestMethod -Uri "$BaseUrl/v3/workflows?skip=$skip&take=$PageSize" -Headers $headers -Method Get)
     if ($response -and $response.Count -gt 0) {
         $allWorkflows.AddRange($response)
         Write-Host "Retrieved $($allWorkflows.Count)..."
@@ -43,39 +36,36 @@ foreach ($wf in $allWorkflows) {
     try {
         $detail = Invoke-RestMethod -Uri "$BaseUrl/v3/workflows/$($wf.id)" -Headers $headers -Method Get
     } catch {
+        Write-Warning "  Failed to get detail for $($wf.name): $($_.Exception.Message)"
         $detail = $null
     }
 
     # Count actual jobs by paginating (runCount from API is unreliable)
+    # Fetch sorted descending so the first result is the most recent job
     $actualRunCount = 0
     $lastJob = $null
     try {
-        # Get first page to check if any jobs exist
-        $firstPage = Invoke-RestMethod -Uri "$BaseUrl/v3/workflows/$($wf.id)/jobs?skip=0&take=$PageSize" -Headers $headers -Method Get
+        $firstPage = @(Invoke-RestMethod -Uri "$BaseUrl/v3/workflows/$($wf.id)/jobs?skip=0&take=$PageSize&sortField=createDateTime&direction=desc" -Headers $headers -Method Get)
         if ($firstPage -and $firstPage.Count -gt 0) {
+            $lastJob = $firstPage[0]
             $actualRunCount = $firstPage.Count
 
             if ($firstPage.Count -eq $PageSize) {
                 # More pages exist — keep counting
                 $countSkip = $PageSize
                 do {
-                    $nextPage = Invoke-RestMethod -Uri "$BaseUrl/v3/workflows/$($wf.id)/jobs?skip=$countSkip&take=$PageSize" -Headers $headers -Method Get
+                    $nextPage = @(Invoke-RestMethod -Uri "$BaseUrl/v3/workflows/$($wf.id)/jobs?skip=$countSkip&take=$PageSize&sortField=createDateTime&direction=desc" -Headers $headers -Method Get)
                     if ($nextPage -and $nextPage.Count -gt 0) {
                         $actualRunCount += $nextPage.Count
                         $countSkip += $PageSize
                     } else { break }
                     Start-Sleep -Milliseconds 150
                 } while ($nextPage.Count -eq $PageSize)
-
-                # Get the actual last job
-                $lastPage = Invoke-RestMethod -Uri "$BaseUrl/v3/workflows/$($wf.id)/jobs?skip=$($actualRunCount - 1)&take=1" -Headers $headers -Method Get
-                if ($lastPage -and $lastPage.Count -gt 0) { $lastJob = $lastPage[-1] }
-            } else {
-                # All jobs fit in one page — last job is the last element
-                $lastJob = $firstPage[-1]
             }
         }
-    } catch {}
+    } catch {
+        Write-Warning "Failed to fetch jobs for $($wf.name): $($_.Exception.Message)"
+    }
 
     $results.Add([PSCustomObject]@{
         id                  = $wf.id
@@ -88,7 +78,7 @@ foreach ($wf in $allWorkflows) {
         published           = if ($detail -and $detail.versions) { $detail.versions[0].published } else { "" }
         runDisabled         = if ($detail -and $detail.versions) { $detail.versions[0].runDisabled } else { "" }
         lastJobStatus       = if ($lastJob) { $lastJob.status } else { "No jobs" }
-        lastJobDate         = if ($lastJob) { $lastJob.createDate } else { "" }
+        lastJobDate         = if ($lastJob) { if ($lastJob.createDateTime) { $lastJob.createDateTime } elseif ($lastJob.createDate) { $lastJob.createDate } else { "" } } else { "" }
     })
 
     Start-Sleep -Milliseconds 150

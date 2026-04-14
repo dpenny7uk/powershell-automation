@@ -106,10 +106,13 @@ ORCHESTRATION_TOOLS = {"Run Command", "Block Until Done", "Batch Macro", "Iterat
                        "Dynamic Input", "Dynamic Replace", "Download (HTTP)"}
 
 
+_PLUGIN_MAP_SORTED = sorted(PLUGIN_MAP.items(), key=lambda kv: len(kv[0]), reverse=True)
+
+
 def classify_plugin(plugin_str):
     if not plugin_str:
         return "Unknown"
-    for key, name in PLUGIN_MAP.items():
+    for key, name in _PLUGIN_MAP_SORTED:
         if key in plugin_str:
             return name
     short = plugin_str.rsplit(".", 1)[-1] if "." in plugin_str else plugin_str
@@ -186,12 +189,13 @@ def parse_workflow(xml_path, is_macro=False):
             tool_name = classify_plugin(plugin)
             result["tools"][tool_name] += 1
 
-        # Tool containers (labelled groups)
-        config = node.find(".//Configuration")
-        if config is not None:
-            caption = config.find("Caption")
-            if caption is not None and caption.text:
-                result["containers"].append(caption.text.strip())
+        # Tool containers (labelled groups) — only capture from ToolContainer nodes
+        if gui is not None and "ToolContainer" in plugin:
+            config = node.find(".//Configuration")
+            if config is not None:
+                caption = config.find("Caption")
+                if caption is not None and caption.text:
+                    result["containers"].append(caption.text.strip())
 
         # Data connections
         for val in node.findall(".//Value"):
@@ -209,7 +213,7 @@ def parse_workflow(xml_path, is_macro=False):
 
         # SQL queries from <File> elements
         for file_el in node.findall(".//File"):
-            if file_el.text and ("Select" in file_el.text or "FROM" in file_el.text.upper()):
+            if file_el.text and re.match(r'\s*(SELECT|INSERT|UPDATE|DELETE|WITH|EXEC)\b', file_el.text.strip(), re.IGNORECASE):
                 sql = file_el.text.strip()
                 if len(sql) > 500:
                     sql = sql[:500] + "..."
@@ -252,6 +256,11 @@ def find_yxmd_files(source_dir):
         temp_dirs.append(tmp)
         try:
             with zipfile.ZipFile(str(yxzp), "r") as zf:
+                # Validate paths to prevent ZipSlip (path traversal)
+                for member in zf.namelist():
+                    member_path = os.path.realpath(os.path.join(tmp, member))
+                    if not member_path.startswith(os.path.realpath(tmp) + os.sep) and member_path != os.path.realpath(tmp):
+                        raise ValueError(f"Unsafe path in archive: {member}")
                 zf.extractall(tmp)
             for ext in workflow_exts:
                 workflow_files.extend(Path(tmp).rglob(ext))
@@ -335,7 +344,7 @@ def build_report(results, output_path):
             cell.border = thin_border
             if row_idx == 1:
                 cell.font = Font(bold=True, size=14)
-            elif row_idx == 5 or row_idx == 9:
+            elif row_idx == 7 or row_idx == 13:
                 cell.font = header_font
                 cell.fill = header_fill
 

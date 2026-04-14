@@ -7,28 +7,22 @@
 #   job_triggers.csv         — one row per job (workflow, creator, job date/status)
 #   job_triggers_summary.csv — one row per workflow (creator, total runs, date range)
 
-$BaseUrl      = "https://alteryx.contoso.com/webapi"
-$TokenUrl     = "https://alteryx.contoso.com/webapi/oauth2/token"
-$ClientId     = "YOUR_CLIENT_ID"
-$ClientSecret = "YOUR_CLIENT_SECRET"
 $OutputCsv    = "C:\Dev\AlteryxExport\job_triggers.csv"
 $SummaryCsv   = "C:\Dev\AlteryxExport\job_triggers_summary.csv"
 $PageSize     = 100
+$ActiveSince  = [datetime]"2025-01-01"   # Only include workflows with jobs on or after this date
 
 # ── Authenticate ──────────────────────────────────────────────────────────
-$tokenBody = @{
-    grant_type    = "client_credentials"
-    client_id     = $ClientId
-    client_secret = $ClientSecret
-}
-$tokenResponse = Invoke-RestMethod -Uri $TokenUrl -Method Post -Body $tokenBody -ContentType "application/x-www-form-urlencoded"
-$headers = @{ "Authorization" = "Bearer $($tokenResponse.access_token)" }
+. "$PSScriptRoot\Get-AlteryxAuth.ps1"
+$auth    = Get-AlteryxAuth
+$headers = $auth.Headers
+$BaseUrl = $auth.BaseUrl
 
 # ── Fetch all workflows (paginated) ──────────────────────────────────────
 $allWorkflows = [System.Collections.Generic.List[object]]::new()
 $skip = 0
 do {
-    $response = Invoke-RestMethod -Uri "$BaseUrl/v3/workflows?skip=$skip&take=$PageSize" -Headers $headers -Method Get
+    $response = @(Invoke-RestMethod -Uri "$BaseUrl/v3/workflows?skip=$skip&take=$PageSize" -Headers $headers -Method Get)
     if ($response -and $response.Count -gt 0) {
         $allWorkflows.AddRange($response)
         Write-Host "Retrieved $($allWorkflows.Count) workflows..."
@@ -38,16 +32,33 @@ do {
 
 Write-Host "Total workflows: $($allWorkflows.Count)"
 
-# ── Fetch all schedules ──────────────────────────────────────────────────
-$schedules = Invoke-RestMethod -Uri "$BaseUrl/v3/schedules" -Headers $headers -Method Get
+# ── Fetch all schedules (paginated) ──────────────────────────────────────
+$schedules = [System.Collections.Generic.List[object]]::new()
+$skip = 0
+do {
+    $response = @(Invoke-RestMethod -Uri "$BaseUrl/v3/schedules?skip=$skip&take=$PageSize" -Headers $headers -Method Get)
+    if ($response -and $response.Count -gt 0) {
+        $schedules.AddRange($response)
+        $skip += $PageSize
+    } else { break }
+} while ($response.Count -eq $PageSize)
+
 $scheduledWorkflowIds = [System.Collections.Generic.HashSet[string]]::new()
 foreach ($s in $schedules) {
     [void]$scheduledWorkflowIds.Add($s.workflowId)
 }
 Write-Host "Scheduled workflows: $($scheduledWorkflowIds.Count)"
 
-# ── Fetch all users and build lookup ─────────────────────────────────────
-$users = Invoke-RestMethod -Uri "$BaseUrl/v3/users?view=Full" -Headers $headers -Method Get
+# ── Fetch all users and build lookup (paginated) ────────────────────────
+$users = [System.Collections.Generic.List[object]]::new()
+$skip = 0
+do {
+    $response = @(Invoke-RestMethod -Uri "$BaseUrl/v3/users?view=Full&skip=$skip&take=$PageSize" -Headers $headers -Method Get)
+    if ($response -and $response.Count -gt 0) {
+        $users.AddRange($response)
+        $skip += $PageSize
+    } else { break }
+} while ($response.Count -eq $PageSize)
 $userLookup = @{}
 foreach ($u in $users) {
     $userLookup[$u.id] = $u
@@ -57,7 +68,6 @@ Write-Host "Users loaded: $($userLookup.Count)"
 # ── Identify unscheduled workflows with recent runs (2025+) ──────────────
 # Note: runCount from the API is unreliable (often 0 for workflows that have
 # actually run). Instead, we fetch the most recent job directly and check its date.
-$ActiveSince = [datetime]"2025-01-01"
 Write-Host "`nChecking for recent jobs (filtering to runs since $($ActiveSince.ToString('yyyy-MM-dd')))..."
 $candidates = [System.Collections.Generic.List[object]]::new()
 $skippedHistoric = 0
@@ -73,7 +83,9 @@ foreach ($wf in $allWorkflows) {
     try {
         $jobs = Invoke-RestMethod -Uri "$BaseUrl/v3/workflows/$($wf.id)/jobs?skip=0&take=1&sortField=createDateTime&direction=desc" -Headers $headers -Method Get
         if ($jobs -and $jobs.Count -gt 0) { $lastJob = $jobs[0] }
-    } catch {}
+    } catch {
+        Write-Warning "Failed to fetch jobs for $($wf.name): $($_.Exception.Message)"
+    }
 
     if (-not $lastJob) {
         $skippedNoJobs++
@@ -86,7 +98,9 @@ foreach ($wf in $allWorkflows) {
             try {
                 $detail = Invoke-RestMethod -Uri "$BaseUrl/v3/workflows/$($wf.id)" -Headers $headers -Method Get
                 $ownerId = if ($detail) { $detail.ownerId } else { "" }
-            } catch {}
+            } catch {
+                Write-Warning "Failed to fetch detail for $($wf.name): $($_.Exception.Message)"
+            }
 
             $candidates.Add([PSCustomObject]@{
                 id       = $wf.id
@@ -125,7 +139,7 @@ foreach ($wf in $candidates) {
     $skip = 0
     do {
         try {
-            $jobs = Invoke-RestMethod -Uri "$BaseUrl/v3/workflows/$($wf.id)/jobs?skip=$skip&take=$PageSize" -Headers $headers -Method Get
+            $jobs = @(Invoke-RestMethod -Uri "$BaseUrl/v3/workflows/$($wf.id)/jobs?skip=$skip&take=$PageSize" -Headers $headers -Method Get)
         } catch {
             Write-Warning "    Failed to fetch jobs for $($wf.name) at skip=$skip"
             break

@@ -1,22 +1,24 @@
 # Export Alteryx Server Collections with Workflow Mappings
 
-$BaseUrl      = "https://alteryx.contoso.com/webapi"
-$TokenUrl     = "https://alteryx.contoso.com/webapi/oauth2/token"
-$ClientId     = "YOUR_CLIENT_ID"
-$ClientSecret = "YOUR_CLIENT_SECRET"
 $OutputCsv    = "C:\Dev\AlteryxExport\collections.csv"
+$PageSize     = 100
 
 # Authenticate
-$tokenBody = @{
-    grant_type    = "client_credentials"
-    client_id     = $ClientId
-    client_secret = $ClientSecret
-}
-$tokenResponse = Invoke-RestMethod -Uri $TokenUrl -Method Post -Body $tokenBody -ContentType "application/x-www-form-urlencoded"
-$headers = @{ "Authorization" = "Bearer $($tokenResponse.access_token)" }
+. "$PSScriptRoot\Get-AlteryxAuth.ps1"
+$auth    = Get-AlteryxAuth
+$headers = $auth.Headers
+$BaseUrl = $auth.BaseUrl
 
-# Get all collections
-$collections = Invoke-RestMethod -Uri "$BaseUrl/v3/collections" -Headers $headers -Method Get
+# Get all collections (paginated)
+$collections = [System.Collections.Generic.List[object]]::new()
+$skip = 0
+do {
+    $response = @(Invoke-RestMethod -Uri "$BaseUrl/v3/collections?skip=$skip&take=$PageSize" -Headers $headers -Method Get)
+    if ($response -and $response.Count -gt 0) {
+        $collections.AddRange($response)
+        $skip += $PageSize
+    } else { break }
+} while ($response.Count -eq $PageSize)
 Write-Host "Total Collections: $($collections.Count)"
 
 # Get detail for each collection

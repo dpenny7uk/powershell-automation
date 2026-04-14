@@ -8,47 +8,25 @@
     and downloads each workflow package (.yxzp) to a local directory.
 
 .NOTES
-    1. Paste your API Key (client_id) and API Secret (client_secret) below
+    1. Paste your API Key (client_id) and API Secret (client_secret) in Get-AlteryxAuth.ps1
     2. Run from a machine that can reach alteryx.contoso.com
 #>
 
 # ── Configuration ─────────────────────────────────────────────────────────────
-$BaseUrl        = "https://alteryx.contoso.com/webapi"
-$TokenUrl       = "https://alteryx.contoso.com/webapi/oauth2/token"
-$ClientId       = "YOUR_CLIENT_ID"       # API Key from your profile
-$ClientSecret   = "YOUR_CLIENT_SECRET"   # API Secret from your profile
 $OutputDir      = "C:\AlteryxExport\workflows"
 $PageSize       = 100
 
 # ── Setup ─────────────────────────────────────────────────────────────────────
 $ErrorActionPreference = "Stop"
 
+. "$PSScriptRoot\Get-AlteryxAuth.ps1"
+$auth    = Get-AlteryxAuth
+$headers = $auth.Headers
+$BaseUrl = $auth.BaseUrl
+
 if (-not (Test-Path $OutputDir)) {
     New-Item -ItemType Directory -Path $OutputDir -Force | Out-Null
     Write-Host "Created output directory: $OutputDir" -ForegroundColor Cyan
-}
-
-# ── Authenticate (OAuth2 Client Credentials) ──────────────────────────────────
-Write-Host "Authenticating..." -ForegroundColor Cyan
-
-$tokenBody = @{
-    grant_type    = "client_credentials"
-    client_id     = $ClientId
-    client_secret = $ClientSecret
-}
-
-try {
-    $tokenResponse = Invoke-RestMethod -Uri $TokenUrl -Method Post -Body $tokenBody -ContentType "application/x-www-form-urlencoded"
-    $accessToken = $tokenResponse.access_token
-    Write-Host "Authentication successful." -ForegroundColor Green
-}
-catch {
-    Write-Error "Failed to authenticate. Check your Client ID/Secret.`n$($_.Exception.Message)"
-    exit 1
-}
-
-$headers = @{
-    "Authorization" = "Bearer $accessToken"
 }
 
 # ── Retrieve all workflow metadata ────────────────────────────────────────────
@@ -61,7 +39,7 @@ do {
     $url = "$BaseUrl/v3/workflows?skip=$skip&take=$PageSize"
 
     try {
-        $response = Invoke-RestMethod -Uri $url -Headers $headers -Method Get
+        $response = @(Invoke-RestMethod -Uri $url -Headers $headers -Method Get)
     }
     catch {
         Write-Warning "Failed to fetch workflows at offset $skip : $($_.Exception.Message)"
@@ -81,16 +59,6 @@ do {
 
 Write-Host "Total workflows found: $($allWorkflows.Count)" -ForegroundColor Green
 
-# ── Export metadata to CSV for reference ──────────────────────────────────────
-$metadataCsv = Join-Path $OutputDir "_workflow_metadata.csv"
-$allWorkflows | Select-Object id, name, isPublic, runCount,
-    @{N='owner';E={$_.owner.email}},
-    @{N='dateCreated';E={$_.dateCreated}},
-    @{N='lastRunDate';E={$_.lastRunDate}} |
-    Export-Csv -Path $metadataCsv -NoTypeInformation -Encoding UTF8
-
-Write-Host "Metadata exported to: $metadataCsv" -ForegroundColor Cyan
-
 # ── Download each workflow package ────────────────────────────────────────────
 Write-Host "`nDownloading workflow packages..." -ForegroundColor Cyan
 
@@ -105,9 +73,14 @@ foreach ($wf in $allWorkflows) {
     $outPath  = Join-Path $OutputDir $fileName
 
     if (Test-Path $outPath) {
-        Write-Host "  SKIP (exists): $safeName" -ForegroundColor DarkGray
-        $success++
-        continue
+        $existingSize = (Get-Item $outPath).Length
+        if ($existingSize -gt 0) {
+            Write-Host "  SKIP (exists): $safeName" -ForegroundColor DarkGray
+            $success++
+            continue
+        }
+        Write-Host "  RE-DOWNLOAD (0-byte file): $safeName" -ForegroundColor Yellow
+        Remove-Item $outPath -Force
     }
 
     $downloadUrl = "$BaseUrl/v3/workflows/$wfId/package"
