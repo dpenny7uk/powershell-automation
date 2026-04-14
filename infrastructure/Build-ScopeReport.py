@@ -5,7 +5,7 @@ Cross-references schedules, metadata, and the migration analysis
 to produce a final report scoped to only active workflows.
 
 Usage:
-    python Build-ScopedReport.py C:\Dev\AlteryxExport
+    python Build-ScopedReport.py <export_directory>
 
 Expects these files in the directory:
     - schedules.csv          (from Export-AlteryxSchedules.ps1)
@@ -22,12 +22,44 @@ Output:
     - scoped_migration_report.xlsx
 """
 
-import sys, os
+import sys, os, re
 from collections import defaultdict
 import pandas as pd
 from openpyxl import Workbook
 from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
 from openpyxl.utils import get_column_letter
+
+
+# ── Naming pattern rules for ownership inference ─────────────────────────────
+# (regex, team_name, suggested_contact)
+NAMING_PATTERNS = [
+    (r"^\d+\.(HICI?|HSA|HIB|HIG)_", "Reserving / Cognos Pipeline", "Daniel Tebbutt (Daniel.Tebbutt@HISCOX.com)"),
+    (r"^\d+\.(Load|Transform|Format|Land)_", "Data Load Pipeline", None),
+    (r"Cognos", "Cognos / BI", "Daniel Tebbutt (Daniel.Tebbutt@HISCOX.com)"),
+    (r"Process\s?RN", "French Operations (RN Processing)", "Roméo Cros (Romeo.Cros@HISCOX.com)"),
+    (r"Process\s?MED", "French Operations (MED Processing)", "Roméo Cros (Romeo.Cros@HISCOX.com)"),
+    (r"MeF|MARSH", "French Operations", "Roméo Cros (Romeo.Cros@HISCOX.com)"),
+    (r"Cyber", "Cyber Insurance", None),
+    (r"EU_IR|EU_FR|EU_NL|EU_BE|EU_", "European Entities", "Tiago Gimenez Jacinto (tiagogimenez.jacinto@hiscox.com)"),
+    (r"EPBCS", "Finance / EPBCS", "Escher Luton (escher.luton@hiscox.com)"),
+    (r"Re_Cube|FEPP|FDW", "Finance / Reserving", None),
+    (r"Scheme|BDX", "Schemes", "Mariana Cardoso (mariana.cardoso@hiscox.com)"),
+    (r"[Ff]lood", "Flood Re", "Mariana Cardoso (mariana.cardoso@hiscox.com)"),
+    (r"BIKMO", "Schemes (BIKMO)", "Mariana Cardoso (mariana.cardoso@hiscox.com)"),
+    (r"[Cc]laim", "Claims", None),
+    (r"LMDR", "Claims / LMDR", None),
+    (r"[Rr]eport|Dashboard|Tableau", "Reporting / Dashboards", None),
+    (r"Recert|Notification|DPD", "IT / Recertification", None),
+    (r"Alternative Risk|Lineage|Acc_Loc", "Alternative Risk", None),
+]
+
+
+def infer_owner_by_name(workflow_name):
+    """Match a workflow name against naming patterns to infer team/contact."""
+    for pattern, team, contact in NAMING_PATTERNS:
+        if re.search(pattern, workflow_name):
+            return team, contact
+    return "", None
 
 def main():
     if len(sys.argv) < 2:
@@ -212,14 +244,19 @@ def main():
                     inv_row = inv_data
                     break
 
-        # Resolve owner from schedule data
+        # Resolve owner — fallback chain:
+        #   1. Schedule owner (from users.csv lookup)
+        #   2. Created By (from job triggers — whoever last ran it)
+        #   3. Name pattern inference (team/contact heuristic)
         owner_id = ""
         owner_name = ""
+        owner_source = ""
         sched_rows = schedules[schedules["workflowId"] == row.get("id", "")]
         if len(sched_rows) > 0:
             owner_id = str(sched_rows.iloc[0].get("ownerId", "")).strip()
         if owner_id and owner_id in user_lookup:
             owner_name = user_lookup[owner_id]
+            owner_source = "Schedule Owner"
 
         # Resolve collections
         wf_id = str(row.get("id", "")).strip()
@@ -228,10 +265,28 @@ def main():
         # Resolve trigger data
         trig = trigger_lookup.get(wf_id, {})
 
+        # Fallback 2: Created By from job triggers
+        created_by = trig.get("createdByName", "")
+        creator_email = trig.get("createdByEmail", "")
+        if created_by and created_by not in ("nan", "Unknown", ""):
+            if not owner_name:
+                owner_name = f"{created_by} ({creator_email})" if creator_email and creator_email != "nan" else created_by
+                owner_source = "Job History"
+
+        # Fallback 3: Name pattern inference
+        team, suggested_contact = infer_owner_by_name(wf_name)
+        if not owner_name and suggested_contact:
+            owner_name = suggested_contact
+            owner_source = "Name Pattern (unconfirmed)"
+        elif not owner_name and team:
+            owner_name = f"[{team} team]"
+            owner_source = "Team Inference (unconfirmed)"
+
         matched.append({
             "Workflow Name": wf_name,
             "Workflow ID": row.get("id", ""),
             "Owner": owner_name,
+            "Ownership Source": owner_source,
             "Collections": wf_collections,
             "Activity Status": row.get("activity_status", ""),
             "Date Created": row.get("dateCreated", ""),
@@ -244,8 +299,8 @@ def main():
             "Schedule Count": row.get("schedule_count", 0) if pd.notna(row.get("schedule_count")) else 0,
             "Schedule Names": row.get("schedule_names", "") if pd.notna(row.get("schedule_names")) else "",
             "Next Scheduled Run": row.get("next_run", "") if pd.notna(row.get("next_run")) else "",
-            "Created By": trig.get("createdByName", ""),
-            "Creator Email": trig.get("createdByEmail", ""),
+            "Created By": created_by if created_by not in ("nan", "Unknown", "") else "",
+            "Creator Email": creator_email if creator_email not in ("nan", "") else "",
             "Total Runs": trig.get("totalRuns", ""),
             "Tier": inv_row["Tier"] if inv_row is not None else "Not in analysis",
             "Tool Count": inv_row["Tool Count"] if inv_row is not None else "",
@@ -405,9 +460,20 @@ def main():
                 cell.fill = tier_fills[val]
             if h == "Activity Status" and val in activity_fills:
                 cell.fill = activity_fills[val]
+            if h == "Ownership Source":
+                source_fills = {
+                    "Schedule Owner": scheduled_fill,
+                    "Job History": tier2_fill,
+                    "Name Pattern (unconfirmed)": tier4_fill,
+                    "Team Inference (unconfirmed)": tier4_fill,
+                }
+                if val in source_fills:
+                    cell.fill = source_fills[val]
+                elif not val and not row.get("Owner", ""):
+                    cell.fill = tier3_fill  # red — no owner at all
 
     ws2.auto_filter.ref = f"A1:{get_column_letter(len(headers))}1"
-    col_widths = [35, 28, 35, 40, 30, 18, 12, 14, 10, 12, 14, 18, 14, 40, 20, 40, 12, 30, 32, 12, 50, 35, 30, 14]
+    col_widths = [35, 28, 35, 25, 40, 30, 18, 12, 14, 10, 12, 14, 18, 14, 40, 20, 40, 12, 30, 32, 12, 50, 35, 30, 14]
     for col_idx, w in enumerate(col_widths[:len(headers)], 1):
         ws2.column_dimensions[get_column_letter(col_idx)].width = w
 
@@ -486,33 +552,37 @@ def main():
 
         ws5.auto_filter.ref = f"A1:{get_column_letter(len(trig_headers))}1"
 
-    # ── Add trigger stats to summary sheet (if available) ─────────────────
-    if trigger_lookup:
-        # Find the summary sheet and append trigger stats at the bottom
-        ws = wb["Summary"]
-        last_row = ws.max_row + 2
+    # ── Add ownership stats to summary sheet ────────────────────────────────
+    ws = wb["Summary"]
+    last_row = ws.max_row + 2
 
-        with_creator = sum(1 for t in trigger_lookup.values() if t.get("createdByName", "") and t["createdByName"] not in ("nan", "Unknown", ""))
-        unscheduled_meta = metadata[metadata["activity_status"] != "Scheduled"]
-        without_creator = len(unscheduled_meta[~unscheduled_meta["id"].isin(trigger_lookup.keys())])
-        unique_creators = set()
-        if trigger_detail is not None:
-            unique_creators = set(trigger_detail[trigger_detail["createdByName"] != "Unknown"]["createdByName"].dropna().unique())
+    # Count by ownership source
+    from collections import Counter
+    source_counts = Counter(r.get("Ownership Source", "") for r in matched)
+    has_owner = sum(1 for r in matched if r.get("Owner", ""))
+    no_owner = sum(1 for r in matched if not r.get("Owner", ""))
 
-        trigger_stats = [
-            ["Ownership Analysis (Unscheduled Workflows)", ""],
-            ["Unscheduled workflows with known creator", with_creator],
-            ["Unscheduled workflows with no known creator", without_creator],
-            ["Unique creators of unscheduled workflows", len(unique_creators)],
-        ]
+    ownership_stats = [
+        ["Ownership Resolution", ""],
+        ["Total active workflows", len(matched)],
+        ["Workflows with owner assigned", has_owner],
+        ["Workflows with no owner", no_owner],
+        ["", ""],
+        ["Ownership Source Breakdown", "Count"],
+        ["Schedule Owner (from Alteryx API)", source_counts.get("Schedule Owner", 0)],
+        ["Job History (whoever last ran it)", source_counts.get("Job History", 0)],
+        ["Name Pattern (inferred, unconfirmed)", source_counts.get("Name Pattern (unconfirmed)", 0)],
+        ["Team Inference (team known, no contact)", source_counts.get("Team Inference (unconfirmed)", 0)],
+        ["Unresolved", no_owner],
+    ]
 
-        for i, row_data in enumerate(trigger_stats):
-            for col_idx, val in enumerate(row_data, 1):
-                cell = ws.cell(row=last_row + i, column=col_idx, value=val)
-                cell.border = thin_border
-                if i == 0:
-                    cell.font = header_font
-                    cell.fill = header_fill
+    for i, row_data in enumerate(ownership_stats):
+        for col_idx, val in enumerate(row_data, 1):
+            cell = ws.cell(row=last_row + i, column=col_idx, value=val)
+            cell.border = thin_border
+            if i == 0 or i == 5:
+                cell.font = header_font
+                cell.fill = header_fill
 
     wb.save(output_path)
     print(f"\nScoped report saved: {output_path}")
