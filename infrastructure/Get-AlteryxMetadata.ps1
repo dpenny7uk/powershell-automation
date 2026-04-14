@@ -14,8 +14,9 @@ $BaseUrl = $auth.BaseUrl
 $allWorkflows = [System.Collections.Generic.List[object]]::new()
 $skip = 0
 do {
-    $response = @(Invoke-RestMethod -Uri "$BaseUrl/v3/workflows?skip=$skip&take=$PageSize" -Headers $headers -Method Get)
-    if ($response -and $response.Count -gt 0) {
+    $raw = Invoke-RestMethod -Uri "$BaseUrl/v3/workflows?skip=$skip&take=$PageSize" -Headers $headers -Method Get
+    $response = if ($raw -is [array]) { $raw } elseif ($null -ne $raw) { @($raw) } else { @() }
+    if ($response.Count -gt 0) {
         $allWorkflows.AddRange($response)
         Write-Host "Retrieved $($allWorkflows.Count)..."
         $skip += $PageSize
@@ -45,8 +46,9 @@ foreach ($wf in $allWorkflows) {
     $actualRunCount = 0
     $lastJob = $null
     try {
-        $firstPage = @(Invoke-RestMethod -Uri "$BaseUrl/v3/workflows/$($wf.id)/jobs?skip=0&take=$PageSize&sortField=createDateTime&direction=desc" -Headers $headers -Method Get)
-        if ($firstPage -and $firstPage.Count -gt 0) {
+        $raw = Invoke-RestMethod -Uri "$BaseUrl/v3/workflows/$($wf.id)/jobs?skip=0&take=$PageSize&sortField=createDateTime&direction=desc" -Headers $headers -Method Get
+        $firstPage = if ($raw -is [array]) { $raw } elseif ($null -ne $raw) { @($raw) } else { @() }
+        if ($firstPage.Count -gt 0) {
             $lastJob = $firstPage[0]
             $actualRunCount = $firstPage.Count
 
@@ -54,8 +56,9 @@ foreach ($wf in $allWorkflows) {
                 # More pages exist — keep counting
                 $countSkip = $PageSize
                 do {
-                    $nextPage = @(Invoke-RestMethod -Uri "$BaseUrl/v3/workflows/$($wf.id)/jobs?skip=$countSkip&take=$PageSize&sortField=createDateTime&direction=desc" -Headers $headers -Method Get)
-                    if ($nextPage -and $nextPage.Count -gt 0) {
+                    $raw = Invoke-RestMethod -Uri "$BaseUrl/v3/workflows/$($wf.id)/jobs?skip=$countSkip&take=$PageSize&sortField=createDateTime&direction=desc" -Headers $headers -Method Get
+                    $nextPage = if ($raw -is [array]) { $raw } elseif ($null -ne $raw) { @($raw) } else { @() }
+                    if ($nextPage.Count -gt 0) {
                         $actualRunCount += $nextPage.Count
                         $countSkip += $PageSize
                     } else { break }

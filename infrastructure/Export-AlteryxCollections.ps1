@@ -13,8 +13,9 @@ $BaseUrl = $auth.BaseUrl
 $collections = [System.Collections.Generic.List[object]]::new()
 $skip = 0
 do {
-    $response = @(Invoke-RestMethod -Uri "$BaseUrl/v3/collections?skip=$skip&take=$PageSize" -Headers $headers -Method Get)
-    if ($response -and $response.Count -gt 0) {
+    $raw = Invoke-RestMethod -Uri "$BaseUrl/v3/collections?skip=$skip&take=$PageSize" -Headers $headers -Method Get
+    $response = if ($raw -is [array]) { $raw } elseif ($null -ne $raw) { @($raw) } else { @() }
+    if ($response.Count -gt 0) {
         $collections.AddRange($response)
         $skip += $PageSize
     } else { break }

@@ -39,14 +39,15 @@ do {
     $url = "$BaseUrl/v3/workflows?skip=$skip&take=$PageSize"
 
     try {
-        $response = @(Invoke-RestMethod -Uri $url -Headers $headers -Method Get)
+        $raw = Invoke-RestMethod -Uri $url -Headers $headers -Method Get
+        $response = if ($raw -is [array]) { $raw } elseif ($null -ne $raw) { @($raw) } else { @() }
     }
     catch {
         Write-Warning "Failed to fetch workflows at offset $skip : $($_.Exception.Message)"
         break
     }
 
-    if ($response -and $response.Count -gt 0) {
+    if ($response.Count -gt 0) {
         $allWorkflows.AddRange($response)
         Write-Host "  Retrieved $($allWorkflows.Count) workflows so far..." -ForegroundColor Gray
         $skip += $PageSize

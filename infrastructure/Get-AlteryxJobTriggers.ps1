@@ -22,8 +22,9 @@ $BaseUrl = $auth.BaseUrl
 $allWorkflows = [System.Collections.Generic.List[object]]::new()
 $skip = 0
 do {
-    $response = @(Invoke-RestMethod -Uri "$BaseUrl/v3/workflows?skip=$skip&take=$PageSize" -Headers $headers -Method Get)
-    if ($response -and $response.Count -gt 0) {
+    $raw = Invoke-RestMethod -Uri "$BaseUrl/v3/workflows?skip=$skip&take=$PageSize" -Headers $headers -Method Get
+    $response = if ($raw -is [array]) { $raw } elseif ($null -ne $raw) { @($raw) } else { @() }
+    if ($response.Count -gt 0) {
         $allWorkflows.AddRange($response)
         Write-Host "Retrieved $($allWorkflows.Count) workflows..."
         $skip += $PageSize
@@ -36,8 +37,9 @@ Write-Host "Total workflows: $($allWorkflows.Count)"
 $schedules = [System.Collections.Generic.List[object]]::new()
 $skip = 0
 do {
-    $response = @(Invoke-RestMethod -Uri "$BaseUrl/v3/schedules?skip=$skip&take=$PageSize" -Headers $headers -Method Get)
-    if ($response -and $response.Count -gt 0) {
+    $raw = Invoke-RestMethod -Uri "$BaseUrl/v3/schedules?skip=$skip&take=$PageSize" -Headers $headers -Method Get
+    $response = if ($raw -is [array]) { $raw } elseif ($null -ne $raw) { @($raw) } else { @() }
+    if ($response.Count -gt 0) {
         $schedules.AddRange($response)
         $skip += $PageSize
     } else { break }
@@ -53,8 +55,9 @@ Write-Host "Scheduled workflows: $($scheduledWorkflowIds.Count)"
 $users = [System.Collections.Generic.List[object]]::new()
 $skip = 0
 do {
-    $response = @(Invoke-RestMethod -Uri "$BaseUrl/v3/users?view=Full&skip=$skip&take=$PageSize" -Headers $headers -Method Get)
-    if ($response -and $response.Count -gt 0) {
+    $raw = Invoke-RestMethod -Uri "$BaseUrl/v3/users?view=Full&skip=$skip&take=$PageSize" -Headers $headers -Method Get
+    $response = if ($raw -is [array]) { $raw } elseif ($null -ne $raw) { @($raw) } else { @() }
+    if ($response.Count -gt 0) {
         $users.AddRange($response)
         $skip += $PageSize
     } else { break }
@@ -139,7 +142,8 @@ foreach ($wf in $candidates) {
     $skip = 0
     do {
         try {
-            $jobs = @(Invoke-RestMethod -Uri "$BaseUrl/v3/workflows/$($wf.id)/jobs?skip=$skip&take=$PageSize" -Headers $headers -Method Get)
+            $raw = Invoke-RestMethod -Uri "$BaseUrl/v3/workflows/$($wf.id)/jobs?skip=$skip&take=$PageSize" -Headers $headers -Method Get
+            $jobs = if ($raw -is [array]) { $raw } elseif ($null -ne $raw) { @($raw) } else { @() }
         } catch {
             Write-Warning "    Failed to fetch jobs for $($wf.name) at skip=$skip"
             break
