@@ -252,21 +252,45 @@ def parse_workflow(xml_path, is_macro=False):
 
 
 def find_yxmd_files(source_dir):
-    """Find all workflow files, extracting from .yxzp archives if needed."""
+    """
+    Find all workflow and macro files.
+
+    Dedupe rule: the canonical representation of a workflow is its .yxzp
+    package. If a loose .yxmd/.yxwz/.yxwg exists alongside a .yxzp of the
+    same stem (e.g. because IT extracted some packages into a sibling
+    folder), prefer the .yxzp and skip the loose copy. Same rule for .yxmc.
+    This avoids double-counting the same logical workflow/macro.
+    """
     source = Path(source_dir)
     workflow_exts = ["*.yxmd", "*.yxwz", "*.yxwg"]
     macro_exts = ["*.yxmc"]
 
+    # Collect .yxzp stems first so we can skip loose files with matching names
+    yxzp_files = list(source.rglob("*.yxzp"))
+    yxzp_stems = {p.stem.lower() for p in yxzp_files}
+
     workflow_files = []
+    skipped_loose = 0
     for ext in workflow_exts:
-        workflow_files.extend(source.rglob(ext))
+        for f in source.rglob(ext):
+            if f.stem.lower() in yxzp_stems:
+                skipped_loose += 1
+                continue
+            workflow_files.append(f)
 
     yxmc_files = []
     for ext in macro_exts:
-        yxmc_files.extend(source.rglob(ext))
+        for f in source.rglob(ext):
+            if f.stem.lower() in yxzp_stems:
+                skipped_loose += 1
+                continue
+            yxmc_files.append(f)
+
+    if skipped_loose:
+        print(f"  Skipped {skipped_loose} loose files with a matching .yxzp (dedupe)")
 
     temp_dirs = []
-    for yxzp in source.rglob("*.yxzp"):
+    for yxzp in yxzp_files:
         tmp = tempfile.mkdtemp(prefix="alteryx_")
         temp_dirs.append(tmp)
         try:
@@ -319,12 +343,21 @@ def build_report(results, output_path):
     macro_total = sum(1 for r in results if r.get("is_macro"))
     total = len(results)
 
+    # Count unique macros referenced by workflows (dedupe by basename)
+    unique_macro_names = set()
+    for r in results:
+        if r.get("is_macro"):
+            continue
+        for m in r["macros"]:
+            unique_macro_names.add(os.path.basename(m))
+
     summary_data = [
         ["Alteryx Migration Inventory - Executive Summary", ""],
         ["", ""],
         ["Total Items Analysed", total],
         ["  Workflows", wf_total],
-        ["  Macros", macro_total],
+        ["  Macros (file copies, incl. embedded duplicates)", macro_total],
+        ["  Unique Macros (deduplicated by name)", len(unique_macro_names)],
         ["", ""],
         ["Workflow Tier Breakdown", "Count"],
     ]
@@ -461,27 +494,48 @@ def build_report(results, output_path):
     ws4.column_dimensions["B"].width = 80
 
     # ── Sheet 5: Macros ───────────────────────────────────────────────────
+    # Dedupe by macro basename — the same macro file can be embedded in many
+    # .yxzp packages (e.g. Cleanse.yxmc in 30 workflows). Count unique logical
+    # macros, not physical file copies.
     ws5 = wb.create_sheet("Macros")
-    macro_headers = ["Macro", "Used By Workflows"]
+    macro_headers = ["Macro", "Used By (count)", "Used By Workflows", "Classification"]
     for col_idx, h in enumerate(macro_headers, 1):
         cell = ws5.cell(row=1, column=col_idx, value=h)
         cell.font = header_font
         cell.fill = header_fill
         cell.border = thin_border
 
-    macro_map = defaultdict(list)
+    macro_map = defaultdict(set)  # basename -> set of workflow names
     for r in results:
+        if r.get("is_macro"):
+            continue  # Don't count macros referencing other macros as "callers"
         for m in r["macros"]:
-            macro_map[m].append(r["name"])
+            basename = os.path.basename(m)
+            macro_map[basename].add(r["name"])
 
-    for row_idx, (macro, wfs) in enumerate(sorted(macro_map.items()), 2):
+    def classify_macro(caller_count):
+        if caller_count >= 3:
+            return "Shared - High Reuse"
+        if caller_count == 2:
+            return "Shared"
+        return "Private / Embedded"
+
+    # Sort by caller count descending (most-shared first)
+    for row_idx, (macro, wfs) in enumerate(
+        sorted(macro_map.items(), key=lambda kv: (-len(kv[1]), kv[0])), 2
+    ):
         ws5.cell(row=row_idx, column=1, value=macro).border = thin_border
-        cell = ws5.cell(row=row_idx, column=2, value=", ".join(wfs))
+        ws5.cell(row=row_idx, column=2, value=len(wfs)).border = thin_border
+        cell = ws5.cell(row=row_idx, column=3, value=", ".join(sorted(wfs)))
         cell.border = thin_border
         cell.alignment = Alignment(wrap_text=True)
+        ws5.cell(row=row_idx, column=4, value=classify_macro(len(wfs))).border = thin_border
 
-    ws5.column_dimensions["A"].width = 50
-    ws5.column_dimensions["B"].width = 80
+    ws5.column_dimensions["A"].width = 45
+    ws5.column_dimensions["B"].width = 15
+    ws5.column_dimensions["C"].width = 80
+    ws5.column_dimensions["D"].width = 22
+    ws5.auto_filter.ref = f"A1:D1"
 
     # ── Sheet 6: SQL Queries ──────────────────────────────────────────────
     ws6 = wb.create_sheet("SQL Queries")
