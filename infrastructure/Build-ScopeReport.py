@@ -113,12 +113,24 @@ def main():
     if os.path.exists(users_path):
         print("Loading users...")
         users = pd.read_csv(users_path)
+
+        def _clean(v):
+            s = str(v).strip()
+            return "" if s.lower() in ("nan", "none") else s
+
         for _, u in users.iterrows():
-            uid = str(u.get("id", "")).strip()
-            first = str(u.get("firstName", "")).strip()
-            last = str(u.get("lastName", "")).strip()
-            email = str(u.get("email", "")).strip()
-            user_lookup[uid] = f"{first} {last} ({email})" if email and email != "nan" else f"{first} {last}"
+            uid = _clean(u.get("id", ""))
+            first = _clean(u.get("firstName", ""))
+            last = _clean(u.get("lastName", ""))
+            email = _clean(u.get("email", ""))
+            if not uid:
+                continue
+            name = (f"{first} {last}").strip()
+            if email:
+                display = f"{name} ({email})" if name else email
+            else:
+                display = name if name else f"[user {uid}]"
+            user_lookup[uid] = display
         print(f"  Loaded {len(user_lookup)} users")
     else:
         print("  users.csv not found — owner names will not be resolved")
@@ -306,19 +318,30 @@ def main():
                     inv_row = inv_data
                     break
 
-        # Resolve owner — fallback chain:
+        # Resolve owner — fallback chain (runs for ALL workflows, scheduled or not):
         #   1. Schedule owner (from users.csv lookup)
-        #   2. Created By (from job triggers — whoever last ran it)
-        #   3. Name pattern inference (team/contact heuristic)
+        #   2. Workflow metadata ownerId (from /v3/workflows/{id} detail)
+        #   3. Created By (from job triggers — whoever last ran it)
+        #   4. Raw ownerId (surface deactivated user IDs so they can be traced manually)
+        #   5. Name pattern inference (team/contact heuristic)
         owner_id = ""
         owner_name = ""
         owner_source = ""
+
+        # Schedule ownerId takes priority; fall back to workflow-detail ownerId
         sched_rows = schedules[schedules["workflowId"] == row.get("id", "")]
         if len(sched_rows) > 0:
-            owner_id = str(sched_rows.iloc[0].get("ownerId", "")).strip()
+            raw = str(sched_rows.iloc[0].get("ownerId", "")).strip()
+            if raw and raw.lower() != "nan":
+                owner_id = raw
+        if not owner_id:
+            meta_owner = str(row.get("ownerId", "")).strip()
+            if meta_owner and meta_owner.lower() != "nan":
+                owner_id = meta_owner
+
         if owner_id and owner_id in user_lookup:
             owner_name = user_lookup[owner_id]
-            owner_source = "Schedule Owner"
+            owner_source = "Schedule Owner" if len(sched_rows) > 0 else "Workflow Owner"
 
         # Resolve collections
         wf_id = str(row.get("id", "")).strip()
@@ -327,7 +350,8 @@ def main():
         # Resolve trigger data
         trig = trigger_lookup.get(wf_id, {})
 
-        # Fallback 2: Created By from job triggers
+        # Fallback 3: Created By from job triggers (applies to scheduled workflows
+        # too — some scheduled workflows have manual-run records)
         created_by = trig.get("createdByName", "")
         creator_email = trig.get("createdByEmail", "")
         if created_by and created_by not in ("nan", "Unknown", ""):
@@ -335,7 +359,14 @@ def main():
                 owner_name = f"{created_by} ({creator_email})" if creator_email and creator_email != "nan" else created_by
                 owner_source = "Job History"
 
-        # Fallback 3: Name pattern inference
+        # Fallback 4: we know the ownerId exists but users.csv doesn't have it
+        # (deactivated user, leaver). Surface the raw ID so it can be looked
+        # up manually rather than leaving the cell blank.
+        if not owner_name and owner_id:
+            owner_name = f"[Unknown user: {owner_id}]"
+            owner_source = "Deactivated/Unknown User"
+
+        # Fallback 5: Name pattern inference
         team, suggested_contact = infer_owner_by_name(wf_name)
         if not owner_name and suggested_contact:
             owner_name = suggested_contact
@@ -560,9 +591,11 @@ def main():
             if h == "Ownership Source":
                 source_fills = {
                     "Schedule Owner": scheduled_fill,
+                    "Workflow Owner": scheduled_fill,
                     "Job History": tier2_fill,
                     "Name Pattern (unconfirmed)": tier4_fill,
                     "Team Inference (unconfirmed)": tier4_fill,
+                    "Deactivated/Unknown User": tier3_fill,  # red — needs manual trace
                 }
                 if val in source_fills:
                     cell.fill = source_fills[val]
@@ -669,7 +702,9 @@ def main():
         ["", ""],
         ["Ownership Source Breakdown", "Count"],
         ["Schedule Owner (from Alteryx API)", source_counts.get("Schedule Owner", 0)],
+        ["Workflow Owner (from workflow detail API)", source_counts.get("Workflow Owner", 0)],
         ["Job History (whoever last ran it)", source_counts.get("Job History", 0)],
+        ["Deactivated/Unknown User (raw ID shown)", source_counts.get("Deactivated/Unknown User", 0)],
         ["Name Pattern (inferred, unconfirmed)", source_counts.get("Name Pattern (unconfirmed)", 0)],
         ["Team Inference (team known, no contact)", source_counts.get("Team Inference (unconfirmed)", 0)],
         ["Unresolved", no_owner],
