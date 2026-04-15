@@ -256,9 +256,13 @@ def main():
         if is_new_2026:
             return "New 2026 - Scheduled" if row["is_scheduled"] else "New 2026 - Unscheduled"
 
-        # Scheduled workflows: split by whether the next run is in the future
+        # Scheduled workflows: "Active" requires BOTH a future next-run AND a
+        # recent actual job. A schedule with a future next-run but no real job
+        # since 2024 is a stuck/broken schedule, not a live workflow.
         if row["is_scheduled"]:
-            if pd.notna(next_run) and next_run >= today:
+            has_future_run = pd.notna(next_run) and next_run >= today
+            has_recent_job = pd.notna(last_run) and last_run >= pd.Timestamp("2025-01-01")
+            if has_future_run and has_recent_job:
                 return f"Active - Scheduled{year_suffix}"
             return f"Historic - Scheduled{year_suffix}"
 
