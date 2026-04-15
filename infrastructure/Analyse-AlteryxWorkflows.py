@@ -109,8 +109,16 @@ ORCHESTRATION_TOOLS = {"Run Command", "Block Until Done", "Batch Macro", "Iterat
 _PLUGIN_MAP_SORTED = sorted(PLUGIN_MAP.items(), key=lambda kv: len(kv[0]), reverse=True)
 
 
-def classify_plugin(plugin_str):
+def classify_plugin(plugin_str, macro_ref=""):
+    """
+    Classify a node's plugin. If the Plugin attribute is empty but the node
+    references a macro via EngineSettings.Macro, return "Macro: <name>" so
+    macro-backed custom tools don't all collapse into "Unknown".
+    """
     if not plugin_str:
+        if macro_ref:
+            macro_name = os.path.basename(macro_ref).replace(".yxmc", "")
+            return f"Macro: {macro_name}"
         return "Unknown"
     for key, name in _PLUGIN_MAP_SORTED:
         if key in plugin_str:
@@ -184,9 +192,16 @@ def parse_workflow(xml_path, is_macro=False):
 
     for node in nodes:
         gui = node.find(".//GuiSettings")
+        # Peek at EngineSettings.Macro so classify_plugin can name macro-backed tools
+        engine_peek = node.find(".//EngineSettings")
+        macro_ref = engine_peek.get("Macro", "") if engine_peek is not None else ""
         if gui is not None:
             plugin = gui.get("Plugin", "")
-            tool_name = classify_plugin(plugin)
+            tool_name = classify_plugin(plugin, macro_ref)
+            result["tools"][tool_name] += 1
+        elif macro_ref:
+            # Macro tools sometimes have no GuiSettings at all
+            tool_name = classify_plugin("", macro_ref)
             result["tools"][tool_name] += 1
 
         # Tool containers (labelled groups) — only capture from ToolContainer nodes

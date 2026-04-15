@@ -61,6 +61,23 @@ def infer_owner_by_name(workflow_name):
             return team, contact
     return "", None
 
+
+def flag_tier_review(tier, is_scheduled):
+    """
+    Scheduled analytic apps usually run in batch mode with default answers and
+    should migrate as Tier 2 (orchestration), but some may genuinely be
+    user-initiated apps that happen to also have a schedule. Flag for human
+    review rather than silently rewriting the tier.
+
+    Returns (review_flag, review_reason).
+    """
+    if is_scheduled and tier == "Tier 4 - Self-Service/Interface":
+        return (
+            "Needs Manual Review",
+            "Scheduled analytic app — likely Tier 2 (batch), confirm whether UI is actually used",
+        )
+    return ("", "")
+
 def main():
     if len(sys.argv) < 2:
         print("Usage: python Build-ScopedReport.py <directory>")
@@ -184,33 +201,26 @@ def main():
         )
     )
 
-    # Classification
+    # Parse dateCreated so we can spot newly-created workflows
+    metadata["dateCreated_parsed"] = pd.to_datetime(metadata["dateCreated"], errors="coerce", dayfirst=True)
+
+    # First-pass classification (coarse — refined after schedule merge)
     def classify_activity(row):
         if row["is_scheduled"]:
             return "Scheduled"
         elif row["is_active_unscheduled"]:
-            # Sub-classify by recency — 2025 cutoff
-            if pd.notna(row["lastJobDate_parsed"]) and row["lastJobDate_parsed"] >= pd.Timestamp("2025-01-01"):
-                return "Active (Unscheduled - Recent)"
-            elif pd.notna(row["lastJobDate_parsed"]) and row["lastJobDate_parsed"] < pd.Timestamp("2025-01-01"):
-                return "Active (Unscheduled - Historic)"
-            elif row["runCount"] > 0:
-                return "Active (Unscheduled - Historic)"
-            else:
-                return "Active (Unscheduled - Has Jobs)"
+            return "Active - Unscheduled"
         else:
             return "Inactive"
 
     metadata["activity_status"] = metadata.apply(classify_activity, axis=1)
 
-    # Print breakdown
-    print("\n── Activity Classification ──")
-    for status, count in metadata["activity_status"].value_counts().items():
-        print(f"  {status}: {count}")
-
-    # Scope: everything that isn't Inactive
-    active_meta = metadata[metadata["activity_status"] != "Inactive"].copy()
-    print(f"\nTotal in scope (all active): {len(active_meta)}")
+    # Scope: everything that isn't Inactive, PLUS newly-created 2026 workflows
+    # (even if they have no runs yet — they're in scope for migration)
+    in_scope_mask = (metadata["activity_status"] != "Inactive") | (
+        metadata["dateCreated_parsed"].dt.year.fillna(0).astype(int) == 2026
+    )
+    active_meta = metadata[in_scope_mask].copy()
 
     # ── Schedule summary per workflow ─────────────────────────────────────
     sched_summary = schedules.groupby("workflowId").agg(
@@ -220,6 +230,54 @@ def main():
     ).reset_index()
 
     active_meta = active_meta.merge(sched_summary, left_on="id", right_on="workflowId", how="left", suffixes=("", "_sched"))
+
+    # ── Refine activity_status with schedule next-run and last-run year ──
+    today = pd.Timestamp.now().normalize()
+
+    def refine_activity_status(row):
+        """
+        Produces statuses like:
+          - "Active - Scheduled 2026"      (schedule has a future run, last ran in 2026)
+          - "Historic - Scheduled 2024"    (no future runs, last ran in 2024)
+          - "Active - Unscheduled 2026"    (no schedule, recent manual runs)
+          - "Historic - Unscheduled 2023"  (no schedule, old manual runs)
+          - "New 2026 - Scheduled"         (created 2026, no runs yet, has a schedule)
+          - "New 2026 - Unscheduled"       (created 2026, no runs yet, no schedule)
+          - "Inactive"
+        """
+        last_run = row.get("lastJobDate_parsed")
+        next_run = pd.to_datetime(row.get("next_run"), errors="coerce")
+        date_created = row.get("dateCreated_parsed")
+        year_suffix = f" {last_run.year}" if pd.notna(last_run) else ""
+
+        # Newly-created 2026 workflow with no run history yet
+        has_runs = pd.notna(last_run) or (row.get("runCount", 0) or 0) > 0
+        is_new_2026 = pd.notna(date_created) and date_created.year == 2026 and not has_runs
+        if is_new_2026:
+            return "New 2026 - Scheduled" if row["is_scheduled"] else "New 2026 - Unscheduled"
+
+        # Scheduled workflows: split by whether the next run is in the future
+        if row["is_scheduled"]:
+            if pd.notna(next_run) and next_run >= today:
+                return f"Active - Scheduled{year_suffix}"
+            return f"Historic - Scheduled{year_suffix}"
+
+        # Unscheduled workflows with activity
+        if row["is_active_unscheduled"]:
+            if pd.notna(last_run) and last_run >= pd.Timestamp("2025-01-01"):
+                return f"Active - Unscheduled{year_suffix}"
+            return f"Historic - Unscheduled{year_suffix}"
+
+        return "Inactive"
+
+    active_meta["activity_status"] = active_meta.apply(refine_activity_status, axis=1)
+
+    # Print refined breakdown
+    print("\n── Activity Classification (refined) ──")
+    for status, count in active_meta["activity_status"].value_counts().items():
+        print(f"  {status}: {count}")
+
+    print(f"\nTotal in scope (all active + new 2026): {len(active_meta)}")
 
     # ── Match to migration analysis by workflow name ──────────────────────
     # The migration report uses workflow names, metadata uses names too
@@ -303,6 +361,14 @@ def main():
             "Creator Email": creator_email if creator_email not in ("nan", "") else "",
             "Total Runs": trig.get("totalRuns", ""),
             "Tier": inv_row["Tier"] if inv_row is not None else "Not in analysis",
+            "Review Flag": flag_tier_review(
+                inv_row["Tier"] if inv_row is not None else "",
+                bool(row.get("is_scheduled", False)),
+            )[0],
+            "Review Reason": flag_tier_review(
+                inv_row["Tier"] if inv_row is not None else "",
+                bool(row.get("is_scheduled", False)),
+            )[1],
             "Tool Count": inv_row["Tool Count"] if inv_row is not None else "",
             "Tools Used": inv_row["Tools Used"] if inv_row is not None else "",
             "Data Connections": inv_row["Data Connections"] if inv_row is not None else "",
@@ -350,12 +416,22 @@ def main():
         left=Side(style="thin"), right=Side(style="thin"),
         top=Side(style="thin"), bottom=Side(style="thin")
     )
-    activity_fills = {
-        "Scheduled": scheduled_fill,
-        "Active (Unscheduled - Recent)": recent_fill,
-        "Active (Unscheduled - Historic)": historic_fill,
-        "Active (Unscheduled - Has Jobs)": recent_fill,
-    }
+    # Activity-status fills are matched by prefix because the new statuses
+    # carry a year suffix (e.g. "Active - Scheduled 2026")
+    def fill_for_activity_status(val):
+        if not val:
+            return None
+        if val.startswith("Active - Scheduled"):
+            return scheduled_fill   # green — top priority
+        if val.startswith("Historic - Scheduled"):
+            return recent_fill      # amber — was scheduled, now stale
+        if val.startswith("Active - Unscheduled"):
+            return recent_fill      # amber — recent manual usage
+        if val.startswith("Historic - Unscheduled"):
+            return historic_fill    # red — old manual usage
+        if val.startswith("New 2026"):
+            return scheduled_fill   # green — fresh, in scope
+        return None
     tier_fills = {
         "Tier 1 - Simple ETL": tier1_fill,
         "Tier 2 - Transform & Orchestrate": tier2_fill,
@@ -388,11 +464,20 @@ def main():
         ["Total Workflows in Gallery", len(metadata)],
         ["", ""],
         ["Activity Classification", "Count"],
-        ["Scheduled (must migrate)", int(metadata["activity_status"].eq("Scheduled").sum())],
-        ["Active - Unscheduled, Recent (ran since 2025)", int(metadata["activity_status"].eq("Active (Unscheduled - Recent)").sum())],
-        ["Active - Unscheduled, Historic (has runs, no recent jobs)", int(metadata["activity_status"].eq("Active (Unscheduled - Historic)").sum())],
-        ["Active - Unscheduled, Has Jobs", int(metadata["activity_status"].eq("Active (Unscheduled - Has Jobs)").sum())],
-        ["Inactive (no runs, no jobs, no schedule)", int(metadata["activity_status"].eq("Inactive").sum())],
+        ["Active - Scheduled (next run in future — HIGHEST PRIORITY)",
+            int(active_meta["activity_status"].str.startswith("Active - Scheduled").sum())],
+        ["Historic - Scheduled (schedule exists but no future runs)",
+            int(active_meta["activity_status"].str.startswith("Historic - Scheduled").sum())],
+        ["Active - Unscheduled (run manually since 2025)",
+            int(active_meta["activity_status"].str.startswith("Active - Unscheduled").sum())],
+        ["Historic - Unscheduled (ran manually, but not since 2025)",
+            int(active_meta["activity_status"].str.startswith("Historic - Unscheduled").sum())],
+        ["New 2026 - Scheduled (created this year, on a schedule)",
+            int(active_meta["activity_status"].eq("New 2026 - Scheduled").sum())],
+        ["New 2026 - Unscheduled (created this year, no schedule)",
+            int(active_meta["activity_status"].eq("New 2026 - Unscheduled").sum())],
+        ["Inactive (no runs, no jobs, no schedule, not new)",
+            int(metadata["activity_status"].eq("Inactive").sum()) - int(active_meta["activity_status"].str.startswith("New 2026").sum())],
         ["", ""],
         ["Note: disabled schedules", int(len(disabled_ids))],
         ["(These workflows have schedules that are turned off. They are counted", ""],
@@ -409,7 +494,13 @@ def main():
                  "Not in analysis"]:
         summary_rows.append([tier, tier_counts.get(tier, 0)])
 
+    # Count workflows flagged for manual tier review
+    flagged_count = sum(1 for r in matched if r.get("Review Flag"))
+
     summary_rows += [
+        ["", ""],
+        ["Workflows Needing Manual Tier Review", "Count"],
+        ["Scheduled Tier 4 (likely batch, not self-service)", flagged_count],
         ["", ""],
         ["Platform Recommendation", ""],
         ["Tier 1 - Simple ETL", "Any platform: ADF, Python, Power BI Dataflows, Databricks"],
@@ -422,7 +513,7 @@ def main():
     # Rows that should get header styling (dark blue background, white text)
     header_labels = {
         "Activity Classification", "Active Workflow Tier Breakdown", "Platform Recommendation",
-        "What This Report Shows",
+        "What This Report Shows", "Workflows Needing Manual Tier Review",
     }
 
     for row_idx, row_data in enumerate(summary_rows, 1):
@@ -458,8 +549,10 @@ def main():
             cell.alignment = Alignment(wrap_text=True, vertical="top")
             if h == "Tier" and val in tier_fills:
                 cell.fill = tier_fills[val]
-            if h == "Activity Status" and val in activity_fills:
-                cell.fill = activity_fills[val]
+            if h == "Activity Status":
+                fill = fill_for_activity_status(val)
+                if fill is not None:
+                    cell.fill = fill
             if h == "Ownership Source":
                 source_fills = {
                     "Schedule Owner": scheduled_fill,
@@ -471,9 +564,11 @@ def main():
                     cell.fill = source_fills[val]
                 elif not val and not row.get("Owner", ""):
                     cell.fill = tier3_fill  # red — no owner at all
+            if h == "Review Flag" and val == "Needs Manual Review":
+                cell.fill = tier2_fill  # amber — needs attention
 
     ws2.auto_filter.ref = f"A1:{get_column_letter(len(headers))}1"
-    col_widths = [35, 28, 35, 25, 40, 30, 18, 12, 14, 10, 12, 14, 18, 14, 40, 20, 40, 12, 30, 32, 12, 50, 35, 30, 14]
+    col_widths = [35, 28, 35, 25, 40, 30, 18, 12, 14, 10, 12, 14, 18, 14, 40, 20, 40, 12, 30, 32, 20, 50, 12, 50, 35, 30, 14]
     for col_idx, w in enumerate(col_widths[:len(headers)], 1):
         ws2.column_dimensions[get_column_letter(col_idx)].width = w
 
