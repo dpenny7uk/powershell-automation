@@ -105,6 +105,17 @@ INTERFACE_TOOLS = {"Interface Tab", "Interface TextBox", "Interface Dropdown",
 ORCHESTRATION_TOOLS = {"Run Command", "Block Until Done", "Batch Macro", "Iterative Macro",
                        "Dynamic Input", "Dynamic Replace", "Download (HTTP)"}
 
+# Used by platform-ranking signal extraction
+DB_IO_TOOLS = {"DB Input", "DB Output", "File Input", "File Output", "Text Input"}
+TRANSFORM_TOOLS = {"Filter", "Formula", "Multi-Field Formula", "Multi-Row Formula",
+                   "Sort", "Unique", "Sample", "Data Cleansing", "Record ID",
+                   "Generate Rows", "DateTime", "Running Total", "Join", "Find Replace",
+                   "Append Fields", "Union", "Join Multiple", "Cross Tab", "Transpose",
+                   "Summarize", "RegEx", "Select", "XML Parse", "JSON Parse",
+                   "Text to Columns", "Column to Rows"}
+REPORT_OUTPUT_TOOLS = {"Report Text", "Report Header", "Report Layout", "Report Render",
+                       "Report Table", "Report Chart", "Report Map"}
+
 
 _PLUGIN_MAP_SORTED = sorted(PLUGIN_MAP.items(), key=lambda kv: len(kv[0]), reverse=True)
 
@@ -140,6 +151,63 @@ def classify_tier(tools_used, has_macros, is_macro=False, has_questions=False):
     return "Tier 1 - Simple ETL"
 
 
+def detect_connection_hint(connection_strings):
+    """
+    Scan connection strings for well-known driver signatures. Returns one of:
+    'sqlserver', 'oracle', 'flatfile', 'api', 'mixed', or ''.
+    """
+    hints = set()
+    for conn in connection_strings:
+        c = str(conn).lower()
+        if "sqloledb" in c or "msoledbsql" in c or "odbc driver" in c and "sql server" in c:
+            hints.add("sqlserver")
+        elif "sql server" in c or "sqlncli" in c:
+            hints.add("sqlserver")
+        elif "oraoledb" in c or "oracle" in c:
+            hints.add("oracle")
+        elif "microsoft.ace.oledb" in c or ".xlsx" in c or ".xls" in c or ".csv" in c or ".txt" in c:
+            hints.add("flatfile")
+        elif "http://" in c or "https://" in c:
+            hints.add("api")
+    if len(hints) == 0:
+        return ""
+    if len(hints) == 1:
+        return next(iter(hints))
+    return "mixed"
+
+
+def compute_signals(result):
+    """
+    Derive platform-ranking signals from a parsed workflow result. Returns a
+    dict of bools / ratios / counts consumed by score_platforms.rank_platforms.
+    """
+    tools = set(result["tools"].keys())
+    tool_count = result["tool_count"]
+
+    # Proportions — guard against division-by-zero when parse failed
+    db_io_count = sum(v for k, v in result["tools"].items() if k in DB_IO_TOOLS)
+    transform_count = sum(v for k, v in result["tools"].items() if k in TRANSFORM_TOOLS)
+    total = sum(result["tools"].values()) or 1  # total tool instances, min 1
+
+    return {
+        "has_python_or_r":   bool(tools & {"Python Tool", "R Tool"}),
+        "has_spatial":       bool(tools & SPATIAL_TOOLS),
+        "has_predictive":    bool(tools & (PREDICTIVE_TOOLS - {"Python Tool", "R Tool"})),
+        "has_http":          "Download (HTTP)" in tools,
+        "has_email":         "Email" in tools,
+        "has_report_output": bool(tools & REPORT_OUTPUT_TOOLS),
+        "has_interface":     bool(result.get("has_questions")),
+        "has_dynamic":       bool(tools & {"Dynamic Input", "Dynamic Replace"}),
+        "has_run_command":   "Run Command" in tools,
+        "has_macros":        len(result["macros"]) > 0,
+        "db_io_ratio":       round(db_io_count / total, 3),
+        "transform_ratio":   round(transform_count / total, 3),
+        "sql_query_count":   len(result["sql_queries"]),
+        "tool_count":        tool_count,
+        "connection_hint":   detect_connection_hint(result["connections"]),
+    }
+
+
 def parse_workflow(xml_path, is_macro=False):
     """Parse a single .yxmd/.yxmc file and return a structured dict."""
     result = {
@@ -156,6 +224,7 @@ def parse_workflow(xml_path, is_macro=False):
         "credentials": [],
         "has_questions": False,
         "tier": "",
+        "signals": {},
         "errors": [],
     }
 
@@ -247,6 +316,9 @@ def parse_workflow(xml_path, is_macro=False):
 
     # Classify tier
     result["tier"] = classify_tier(list(result["tools"].keys()), len(result["macros"]) > 0, is_macro, result["has_questions"])
+
+    # Derive platform-ranking signals (consumed downstream by score_platforms)
+    result["signals"] = compute_signals(result)
 
     return result
 
@@ -403,7 +475,11 @@ def build_report(results, output_path):
     ws2 = wb.create_sheet("Workflow Inventory")
     headers = ["Workflow Name", "Tier", "Analytic App", "Tool Count", "Tools Used",
                "Data Connections", "Credentials", "Macros", "SQL Query Count",
-               "Containers", "Version", "Errors"]
+               "Containers", "Version", "Errors",
+               # Signals for platform ranking — consumed by Build-ScopeReport.py
+               "Has Python/R", "Has Spatial", "Has Predictive", "Has HTTP", "Has Email",
+               "Has Report Output", "Has Interface", "Has Dynamic", "Has Run Command",
+               "Has Macros", "DB I/O Ratio", "Transform Ratio", "Connection Hint"]
 
     for col_idx, h in enumerate(headers, 1):
         cell = ws2.cell(row=1, column=col_idx, value=h)
@@ -411,7 +487,11 @@ def build_report(results, output_path):
         cell.fill = header_fill
         cell.border = thin_border
 
+    def _bool_cell(v):
+        return "Yes" if v else "No"
+
     for row_idx, r in enumerate(results, 2):
+        sig = r.get("signals", {}) or {}
         row_data = [
             r["name"],
             r["tier"],
@@ -425,6 +505,20 @@ def build_report(results, output_path):
             ", ".join(r["containers"]) if r["containers"] else "",
             r["version"],
             "; ".join(r["errors"]) if r["errors"] else "",
+            # Signals
+            _bool_cell(sig.get("has_python_or_r")),
+            _bool_cell(sig.get("has_spatial")),
+            _bool_cell(sig.get("has_predictive")),
+            _bool_cell(sig.get("has_http")),
+            _bool_cell(sig.get("has_email")),
+            _bool_cell(sig.get("has_report_output")),
+            _bool_cell(sig.get("has_interface")),
+            _bool_cell(sig.get("has_dynamic")),
+            _bool_cell(sig.get("has_run_command")),
+            _bool_cell(sig.get("has_macros")),
+            sig.get("db_io_ratio", ""),
+            sig.get("transform_ratio", ""),
+            sig.get("connection_hint", ""),
         ]
         for col_idx, val in enumerate(row_data, 1):
             cell = ws2.cell(row=row_idx, column=col_idx, value=val)
@@ -434,7 +528,9 @@ def build_report(results, output_path):
                 cell.fill = tier_fills[val]
 
     ws2.auto_filter.ref = f"A1:{get_column_letter(len(headers))}1"
-    for col_idx, w in enumerate([40, 35, 14, 12, 60, 40, 20, 35, 14, 40, 10, 30], 1):
+    col_widths = [40, 35, 14, 12, 60, 40, 20, 35, 14, 40, 10, 30,
+                  13, 12, 14, 10, 10, 18, 14, 13, 16, 12, 12, 14, 16]
+    for col_idx, w in enumerate(col_widths, 1):
         ws2.column_dimensions[get_column_letter(col_idx)].width = w
 
     # ── Sheet 3: Tool Usage Across All Workflows ──────────────────────────

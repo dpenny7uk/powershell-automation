@@ -29,6 +29,45 @@ from openpyxl import Workbook
 from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
 from openpyxl.utils import get_column_letter
 
+from score_platforms import rank_platforms, estimate_manual_effort, estimate_ai_effort, effort_band
+
+
+def _signals_from_inv_row(inv_row):
+    """
+    Reconstruct the signals dict from a Workflow Inventory row (pandas Series).
+    Mirror of Analyse-AlteryxWorkflows.compute_signals output. "Yes"/"No"
+    strings become bools; numeric ratios coerced to float.
+    """
+    if inv_row is None:
+        return None
+
+    def _yn(val):
+        return str(val).strip().lower() == "yes"
+
+    def _num(val, default=0.0):
+        try:
+            return float(val)
+        except (TypeError, ValueError):
+            return default
+
+    return {
+        "has_python_or_r":   _yn(inv_row.get("Has Python/R", "")),
+        "has_spatial":       _yn(inv_row.get("Has Spatial", "")),
+        "has_predictive":    _yn(inv_row.get("Has Predictive", "")),
+        "has_http":          _yn(inv_row.get("Has HTTP", "")),
+        "has_email":         _yn(inv_row.get("Has Email", "")),
+        "has_report_output": _yn(inv_row.get("Has Report Output", "")),
+        "has_interface":     _yn(inv_row.get("Has Interface", "")),
+        "has_dynamic":       _yn(inv_row.get("Has Dynamic", "")),
+        "has_run_command":   _yn(inv_row.get("Has Run Command", "")),
+        "has_macros":        _yn(inv_row.get("Has Macros", "")),
+        "db_io_ratio":       _num(inv_row.get("DB I/O Ratio", 0)),
+        "transform_ratio":   _num(inv_row.get("Transform Ratio", 0)),
+        "sql_query_count":   int(_num(inv_row.get("SQL Query Count", 0))),
+        "tool_count":        int(_num(inv_row.get("Tool Count", 0))),
+        "connection_hint":   str(inv_row.get("Connection Hint", "") or "").strip(),
+    }
+
 
 # ── Naming pattern rules for ownership inference ─────────────────────────────
 # (regex, team_name, suggested_contact)
@@ -375,6 +414,21 @@ def main():
             owner_name = f"[{team} team]"
             owner_source = "Team Inference (unconfirmed)"
 
+        # Platform ranking — only meaningful when the workflow was analysed
+        signals = _signals_from_inv_row(inv_row)
+        if signals is not None:
+            ranking = rank_platforms(signals, bool(row.get("is_scheduled", False)))
+            ranked = ranking["ranked"]
+            rec_1 = ranked[0][1] if len(ranked) > 0 else ""
+            rec_2 = ranked[1][1] if len(ranked) > 1 else ""
+            rec_3 = ranked[2][1] if len(ranked) > 2 else ""
+            ineligible_str = "\n".join(f"{p} \u2014 {r}" for p, r in ranking["ineligible"])
+            manual_effort = estimate_manual_effort(signals)
+            ai_effort = estimate_ai_effort(signals)
+        else:
+            rec_1 = rec_2 = rec_3 = ineligible_str = "\u2014"
+            manual_effort = ai_effort = "\u2014"
+
         matched.append({
             "Workflow Name": wf_name,
             "Workflow ID": row.get("id", ""),
@@ -409,6 +463,12 @@ def main():
             "Data Connections": inv_row["Data Connections"] if inv_row is not None else "",
             "Macros": inv_row["Macros"] if inv_row is not None else "",
             "SQL Query Count": inv_row["SQL Query Count"] if inv_row is not None else "",
+            "Recommended 1st": rec_1,
+            "Recommended 2nd": rec_2,
+            "Recommended 3rd": rec_3,
+            "Ineligible": ineligible_str,
+            "Manual Effort": manual_effort,
+            "AI Agent Effort": ai_effort,
         })
 
         if inv_row is None:
@@ -532,23 +592,80 @@ def main():
     # Count workflows flagged for manual tier review
     flagged_count = sum(1 for r in matched if r.get("Review Flag"))
 
+    # Platform counts — how many workflows had each platform as #1
+    def _platform_from_tag(tag):
+        """Extract platform name from a tag like 'Databricks \u2014 ...'."""
+        if not tag or tag == "\u2014":
+            return ""
+        return tag.split("\u2014", 1)[0].strip()
+
+    platform_1st_counts = defaultdict(int)
+    no_rec_count = 0
+    all_ineligible_count = 0
+    for r in matched:
+        p = _platform_from_tag(r.get("Recommended 1st", ""))
+        if not p:
+            no_rec_count += 1
+            # Distinguish "no rec because not analysed" from "no rec because all ineligible"
+            if r.get("Recommended 1st") != "\u2014" and r.get("Ineligible"):
+                all_ineligible_count += 1
+        else:
+            platform_1st_counts[p] += 1
+
+    # Effort band histograms — distribution of workflows by migration effort
+    manual_band_counts = defaultdict(int)
+    ai_band_counts = defaultdict(int)
+    for r in matched:
+        manual_band_counts[effort_band(r.get("Manual Effort", ""))] += 1
+        ai_band_counts[effort_band(r.get("AI Agent Effort", ""))] += 1
+
     summary_rows += [
         ["", ""],
         ["Workflows Needing Manual Tier Review", "Count"],
         ["Scheduled Tier 4 (likely batch, not self-service)", flagged_count],
         ["", ""],
-        ["Platform Recommendation", ""],
-        ["Tier 1 - Simple ETL", "Any platform: ADF, Python, Power BI Dataflows, Databricks"],
-        ["Tier 2 - Transform & Orchestrate", "ADF or Databricks (pipeline orchestration needed)"],
-        ["Tier 3 - Predictive/Spatial/Code", "Databricks or standalone Python"],
-        ["Tier 4 - Self-Service/Interface", "Needs product decision - user-facing capability"],
-        ["Not in analysis", "Review manually - .yxzp not in export or name mismatch"],
+        ["Platform Recommendation (per-workflow 1st choice)", "Count"],
+        ["Databricks", platform_1st_counts.get("Databricks", 0)],
+        ["ADF", platform_1st_counts.get("ADF", 0)],
+        ["Python", platform_1st_counts.get("Python", 0)],
+        ["PBI Dataflows", platform_1st_counts.get("PBI Dataflows", 0)],
+        ["No recommendation (not analysed)", no_rec_count - all_ineligible_count],
+        ["All platforms ineligible (manual review)", all_ineligible_count],
+        ["", ""],
+        ["Ranking is per-workflow based on .yxzp signals (Python/R tools,", ""],
+        ["spatial, HTTP, report output, interface, macros, connection type,", ""],
+        ["tool count, transform/DB I/O ratio). See 'Recommended 1st/2nd/3rd'", ""],
+        ["and 'Ineligible' columns on the Active Workflows sheet for detail.", ""],
+        ["", ""],
+        ["Migration Effort \u2014 Manual (engineer)", "Count"],
+        ["XS (<1 day)",       manual_band_counts.get("XS", 0)],
+        ["S  (1-3 days)",     manual_band_counts.get("S", 0)],
+        ["M  (3-8 days)",     manual_band_counts.get("M", 0)],
+        ["L  (8-15 days)",    manual_band_counts.get("L", 0)],
+        ["XL (15-30 days)",   manual_band_counts.get("XL", 0)],
+        ["Not analysed",      manual_band_counts.get("N/A", 0)],
+        ["", ""],
+        ["Migration Effort \u2014 AI Agent (hrs + human review)", "Count"],
+        ["XS (1-2 hrs)",      ai_band_counts.get("XS", 0)],
+        ["S  (2-5 hrs)",      ai_band_counts.get("S", 0)],
+        ["M  (5-12 hrs)",     ai_band_counts.get("M", 0)],
+        ["L  (12-30 hrs)",    ai_band_counts.get("L", 0)],
+        ["Not suitable for AI", ai_band_counts.get("Not suitable", 0)],
+        ["Not analysed",      ai_band_counts.get("N/A", 0)],
+        ["", ""],
+        ["Effort is heuristic \u2014 banded from workflow signals, not observed", ""],
+        ["migration data. Calibrate after a handful of completed migrations by", ""],
+        ["comparing predicted vs actual. Does not account for business-logic", ""],
+        ["complexity inside Formula/Filter expressions or documentation quality.", ""],
     ]
 
     # Rows that should get header styling (dark blue background, white text)
     header_labels = {
-        "Activity Classification", "Active Workflow Tier Breakdown", "Platform Recommendation",
+        "Activity Classification", "Active Workflow Tier Breakdown",
+        "Platform Recommendation (per-workflow 1st choice)",
         "What This Report Shows", "Workflows Needing Manual Tier Review",
+        "Migration Effort \u2014 Manual (engineer)",
+        "Migration Effort \u2014 AI Agent (hrs + human review)",
     }
 
     for row_idx, row_data in enumerate(summary_rows, 1):
@@ -605,7 +722,8 @@ def main():
                 cell.fill = tier2_fill  # amber — needs attention
 
     ws2.auto_filter.ref = f"A1:{get_column_letter(len(headers))}1"
-    col_widths = [35, 28, 35, 25, 40, 30, 18, 12, 14, 10, 12, 14, 18, 14, 40, 20, 40, 12, 30, 32, 20, 50, 12, 50, 35, 30, 14]
+    col_widths = [35, 28, 35, 25, 40, 30, 18, 12, 14, 10, 12, 14, 18, 14, 40, 20, 40, 12, 30, 32, 20, 50, 12, 50, 35, 30, 14,
+                  45, 45, 45, 45, 55, 55]
     for col_idx, w in enumerate(col_widths[:len(headers)], 1):
         ws2.column_dimensions[get_column_letter(col_idx)].width = w
 
