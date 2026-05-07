@@ -40,7 +40,7 @@
 
 .PARAMETER ReturnDir
     Local folder to drop the per-host evidence ZIPs and status report.
-    Defaults to C:\Dev\gv228-returns\<UTC timestamp>.
+    Defaults to E:\Libcurl_Remediation\Output\returns-<UTC timestamp>.
 
 .PARAMETER Credential
     Optional. If omitted, uses the current user (Kerberos). Pass an explicit
@@ -109,7 +109,7 @@ if (-not $ScriptPath) {
 }
 if (-not (Test-Path -LiteralPath $ScriptPath)) { throw "Discovery script not found: $ScriptPath" }
 
-if (-not $ReturnDir) { $ReturnDir = "C:\Dev\gv228-returns\$ts" }
+if (-not $ReturnDir) { $ReturnDir = "E:\Libcurl_Remediation\Output\returns-$ts" }
 New-Item -ItemType Directory -Path $ReturnDir -Force | Out-Null
 
 $logPath = Join-Path $ReturnDir "remote-execution.log"

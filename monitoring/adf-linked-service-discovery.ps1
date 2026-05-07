@@ -31,7 +31,7 @@
     and produces a lot of API calls). Set 0 to skip activity-level capture.
 
 .PARAMETER OutDir
-    Default C:\Dev\gv228-evidence.
+    Default E:\Libcurl_Remediation\Output.
 
 .PARAMETER SubscriptionFilter
     Optional list of subscription names or IDs to limit scope.
@@ -45,7 +45,7 @@
 param(
     [int]$RecentRunDays = 30,
     [int]$ActivityRunDays = 7,
-    [string]$OutDir = "C:\Dev\gv228-evidence",
+    [string]$OutDir = "E:\Libcurl_Remediation\Output",
     [string[]]$SubscriptionFilter = @()
 )
 
