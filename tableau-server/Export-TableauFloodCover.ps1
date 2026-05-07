@@ -52,7 +52,7 @@ $TableauUser = "SVC_Tableau"
 $DashboardPath = "InsuranceReportPack/CoverSummary"
 $ParameterName = "Parameters.Partner%20Name"
 
-$LocalBasePath = "D:\FloodCover"
+$TableauExportBasePath = "D:\FloodCover"
 
 $MaxRetries = 3
 $RetryDelaySeconds = 10
@@ -127,7 +127,8 @@ try {
     }
     if ($DryRun) { Write-Log "MODE: DRY RUN - No actual exports" -Level WARN }
 
-    $RemoteExportPath = Join-Path (Join-Path $LocalBasePath $Year) $FolderName
+    # Path is on the Tableau server, not the agent — use [IO.Path]::Combine to avoid Join-Path's drive validation
+    $RemoteExportPath = [System.IO.Path]::Combine($TableauExportBasePath, $Year, $FolderName)
     $UncExportPath = "\\$TableauServerHost\" + ($RemoteExportPath -replace '^([A-Z]):', '$1$')
 
     if ($DryRun) {
