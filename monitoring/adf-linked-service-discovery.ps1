@@ -6,7 +6,7 @@
 
 .DESCRIPTION
     Run by the analyst against their own Azure tenant (NOT for hand-off to a third
-    party — the running identity needs Reader access on every subscription that
+    party - the running identity needs Reader access on every subscription that
     contains a relevant ADF or Synapse workspace).
 
     Outputs (CSVs prefixed with timestamp in $OutDir):
@@ -133,7 +133,7 @@ function Get-DriverFromConnectionString { param([string]$ConnectionString)
 
 # --- Auth ---
 if (-not (Get-AzContext -ErrorAction SilentlyContinue)) {
-    Write-Host "Not signed in to Azure — running Connect-AzAccount..." -ForegroundColor Yellow
+    Write-Host "Not signed in to Azure - running Connect-AzAccount..." -ForegroundColor Yellow
     Connect-AzAccount | Out-Null
 }
 
@@ -208,7 +208,7 @@ foreach ($sub in $subs) {
             }
         } catch {}
 
-        # (B) Triggers — proves scheduled future use
+        # (B) Triggers - proves scheduled future use
         try {
             foreach ($t in (Get-AzDataFactoryV2Trigger -DataFactoryName $df.DataFactoryName -ResourceGroupName $df.ResourceGroupName -ErrorAction Stop)) {
                 $tProps = $t.Properties
@@ -254,7 +254,7 @@ foreach ($sub in $subs) {
             }
         } catch { Write-Warning "    Pipeline runs: $_" }
 
-        # (A) Activity runs (last $ActivityRunDays days) — drill into linked-service usage
+        # (A) Activity runs (last $ActivityRunDays days) - drill into linked-service usage
         if ($ActivityRunDays -gt 0 -and $pipelineRunsForActivity.Count -gt 0) {
             Write-Host "    Capturing activity runs for $($pipelineRunsForActivity.Count) recent pipeline runs..." -ForegroundColor DarkGray
             foreach ($pr in $pipelineRunsForActivity) {

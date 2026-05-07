@@ -20,7 +20,7 @@
          + SHA256 (proves what is installed and that it is genuine MS/Simba code).
       3. Registered ODBC drivers (with REAL DLL FileVersion).
       4. SHIR Application event log (last N days).
-      5. System DSNs — INFORMATIONAL only. SHIR uses runtime connection strings.
+      5. System DSNs - INFORMATIONAL only. SHIR uses runtime connection strings.
          Empty DSN list is NOT evidence drivers are unused.
 
 .PARAMETER OutDir
@@ -71,7 +71,7 @@ Log "User:    $env:USERDOMAIN\$env:USERNAME (elevated=$elevated)"
 Log "PS:      $($PSVersionTable.PSVersion)"
 Log "OS:      $((Get-CimInstance -ClassName Win32_OperatingSystem -ErrorAction SilentlyContinue).Caption)"
 Log "OutDir:  $workDir"
-if (-not $elevated) { Log "WARNING: not elevated — loaded-modules and System DSN data will be incomplete." 'WARN' }
+if (-not $elevated) { Log "WARNING: not elevated - loaded-modules and System DSN data will be incomplete." 'WARN' }
 Log "================================================================="
 
 # ---------- 1. Discover product install roots ----------

@@ -19,7 +19,7 @@
     Folder to seal (Generate mode) or verify (Verify mode).
 
 .PARAMETER Verify
-    Switch — flips the script into verify mode.
+    Switch - flips the script into verify mode.
 
 .EXAMPLE
     # Seal an evidence folder before sending

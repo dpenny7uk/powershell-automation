@@ -61,8 +61,8 @@ foreach ($zip in $zips) {
     # ---------- 2. Manifest + transit-corruption check ----------
     $manifestPath = Join-Path $extractDir 'manifest.json'
     if (-not (Test-Path -LiteralPath $manifestPath)) {
-        # No manifest — still merge the CSVs but flag it.
-        $verificationRows.Add([PSCustomObject]@{ Host=$hostName; Status='NO_MANIFEST'; Detail='manifest.json missing — proceeding with CSV merge but no integrity check.' })
+        # No manifest - still merge the CSVs but flag it.
+        $verificationRows.Add([PSCustomObject]@{ Host=$hostName; Status='NO_MANIFEST'; Detail='manifest.json missing - proceeding with CSV merge but no integrity check.' })
         continue
     }
     try {
@@ -89,7 +89,7 @@ foreach ($zip in $zips) {
     if ($bad.Count -gt 0) {
         $verificationRows.Add([PSCustomObject]@{
             Host=$hostName; Status='TRANSIT_CORRUPTION'
-            Detail="File hash check failed for: $((($bad | ForEach-Object { $_.File }) -join '; ')) — request a re-send."
+            Detail="File hash check failed for: $((($bad | ForEach-Object { $_.File }) -join '; ')) - request a re-send."
         })
         continue
     }
@@ -147,5 +147,5 @@ Write-Host "Extracted evidence:   $extractRoot"
 $bad = @($verificationRows | Where-Object Status -in 'TRANSIT_CORRUPTION','EXTRACT_FAILED','MANIFEST_INVALID')
 if ($bad.Count -gt 0) {
     Write-Host ""
-    Write-Host "[!] $($bad.Count) host(s) had transit/extraction issues — review the report and request a re-send." -ForegroundColor Red
+    Write-Host "[!] $($bad.Count) host(s) had transit/extraction issues - review the report and request a re-send." -ForegroundColor Red
 }

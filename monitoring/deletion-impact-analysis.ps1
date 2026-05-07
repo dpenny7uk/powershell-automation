@@ -15,15 +15,15 @@
       5. Has any pipeline using this driver run successfully in the recent window?
 
     Each row gets a Verdict:
-      DELETE_BLOCKED  — backed by SHIR linked services with recent successful runs.
+      DELETE_BLOCKED  - backed by SHIR linked services with recent successful runs.
                         Running Hexaware's script will cause production failure.
-      RISKY_DELETE    — backed by linked services but no recent runs (low-traffic / dormant).
+      RISKY_DELETE    - backed by linked services but no recent runs (low-traffic / dormant).
                         Could still break the next scheduled run.
-      ORPHAN          — Tenable-flagged but no linked-service references found.
+      ORPHAN          - Tenable-flagged but no linked-service references found.
                         Safe to remove (or better: properly uninstall).
-      NOT_VULNERABLE  — path is in Hexaware's list but NOT in Tenable findings.
+      NOT_VULNERABLE  - path is in Hexaware's list but NOT in Tenable findings.
                         Why is this being deleted at all?
-      UNKNOWN         — couldn't classify (missing data).
+      UNKNOWN         - couldn't classify (missing data).
 
 .PARAMETER HexawareScript
     Path to the Hexaware PS1 to analyse. The script extracts the $files = @( "..." ) array
@@ -34,11 +34,11 @@
     Easiest source: Close & Load the Power Query output from your existing Tenable pivot to a CSV.
 
 .PARAMETER LinkedServiceCsv
-    Output from adf-linked-service-discovery.ps1 — usually:
+    Output from adf-linked-service-discovery.ps1 - usually:
     C:\Dev\gv228-evidence\adf-evidence-<ts>-linked-services.csv
 
 .PARAMETER PipelineRunsCsv
-    Output from adf-linked-service-discovery.ps1 — usually:
+    Output from adf-linked-service-discovery.ps1 - usually:
     C:\Dev\gv228-evidence\adf-evidence-<ts>-pipeline-runs-30d.csv
     Optional. If omitted, RecentRunCount column is blank.
 
@@ -83,7 +83,7 @@ Write-Host "  Found $($hexawarePaths.Count) paths in Hexaware's deletion list" -
 # ---------- 2. Load Tenable findings ----------
 Write-Host "Loading Tenable findings from $TenablePivotCsv..." -ForegroundColor Cyan
 $tenable = Import-Csv -LiteralPath $TenablePivotCsv
-# Normalise column names — accept variants
+# Normalise column names - accept variants
 $pathCol  = ($tenable[0].PSObject.Properties.Name | Where-Object { $_ -in 'Path','LibcurlPath','output.1' })[0]
 $famCol   = ($tenable[0].PSObject.Properties.Name | Where-Object { $_ -in 'DriverFamily','Driver Family','driver_family','Driver' })[0]
 $subCol   = ($tenable[0].PSObject.Properties.Name | Where-Object { $_ -in 'Sub Cat','SubCat','Subcat','Product' })[0]
@@ -113,7 +113,7 @@ if ($PipelineRunsCsv -and (Test-Path -LiteralPath $PipelineRunsCsv)) {
     $pipelineRuns = Import-Csv -LiteralPath $PipelineRunsCsv
     Write-Host "  Pipeline runs (recent window): $($pipelineRuns.Count)" -ForegroundColor Green
 } else {
-    Write-Host "  Pipeline runs CSV not provided — RecentRunCount column will be blank" -ForegroundColor Yellow
+    Write-Host "  Pipeline runs CSV not provided - RecentRunCount column will be blank" -ForegroundColor Yellow
 }
 
 # ---------- 4. Driver-family extraction helper ----------
@@ -173,19 +173,19 @@ foreach ($p in $hexawarePaths) {
     $rationale = ''
     if (-not $isInTenable) {
         $verdict = 'NOT_VULNERABLE'
-        $rationale = "Path is in Hexaware's deletion list but does NOT appear in Tenable findings — why is this being deleted?"
+        $rationale = "Path is in Hexaware's deletion list but does NOT appear in Tenable findings - why is this being deleted?"
     } elseif ($shirLses.Count -gt 0 -and $recentRunCount -gt 0) {
         $verdict = 'DELETE_BLOCKED'
         $rationale = "$($shirLses.Count) SHIR linked services depend on $family with $recentRunCount successful pipeline runs in the recent window. Deletion will break production."
     } elseif ($shirLses.Count -gt 0) {
         $verdict = 'RISKY_DELETE'
-        $rationale = "$($shirLses.Count) SHIR linked services depend on $family but no recent successful runs detected. Still risky — next scheduled run will fail."
+        $rationale = "$($shirLses.Count) SHIR linked services depend on $family but no recent successful runs detected. Still risky - next scheduled run will fail."
     } elseif ($matchingLses.Count -gt 0) {
         $verdict = 'RISKY_DELETE'
-        $rationale = "$($matchingLses.Count) linked services reference $family but on non-SHIR runtimes. May or may not break — investigate."
+        $rationale = "$($matchingLses.Count) linked services reference $family but on non-SHIR runtimes. May or may not break - investigate."
     } else {
         $verdict = 'ORPHAN'
-        $rationale = "Tenable-flagged but no linked-service references found. Driver appears unused — preferred remediation is uninstall, not file deletion."
+        $rationale = "Tenable-flagged but no linked-service references found. Driver appears unused - preferred remediation is uninstall, not file deletion."
     }
 
     $impact.Add([PSCustomObject]@{
@@ -251,13 +251,13 @@ if ($blocked -gt 0) {
     Write-Host "       Running Hexaware's script will break production." -ForegroundColor Red
 }
 if ($risky -gt 0) {
-    Write-Host "[WARN] $risky path(s) backed by linked services without recent runs — next scheduled run will fail." -ForegroundColor Yellow
+    Write-Host "[WARN] $risky path(s) backed by linked services without recent runs - next scheduled run will fail." -ForegroundColor Yellow
 }
 if ($orphan -gt 0) {
-    Write-Host "[INFO] $orphan path(s) Tenable-flagged but with no linked-service references — proper uninstall recommended over file deletion." -ForegroundColor Cyan
+    Write-Host "[INFO] $orphan path(s) Tenable-flagged but with no linked-service references - proper uninstall recommended over file deletion." -ForegroundColor Cyan
 }
 if ($nv -gt 0) {
-    Write-Host "[QUESTION] $nv path(s) in Hexaware's list but NOT in Tenable findings — why are these being deleted?" -ForegroundColor Magenta
+    Write-Host "[QUESTION] $nv path(s) in Hexaware's list but NOT in Tenable findings - why are these being deleted?" -ForegroundColor Magenta
 }
 Write-Host ""
 Write-Host "Outputs:" -ForegroundColor Green

@@ -166,7 +166,7 @@ if (-not $sessions) {
 
 if ($DryRun) {
     foreach ($s in $sessions) {
-        $status.Add([PSCustomObject]@{ Server=$s.ComputerName; SessionOpened=$true; DiscoveryRan=$false; ZipReturned=$false; Detail='DryRun — connectivity OK' })
+        $status.Add([PSCustomObject]@{ Server=$s.ComputerName; SessionOpened=$true; DiscoveryRan=$false; ZipReturned=$false; Detail='DryRun - connectivity OK' })
     }
     $sessions | Remove-PSSession
     $status | Export-Csv -NoTypeInformation -Path (Join-Path $ReturnDir "remote-execution-status-$ts.csv")
