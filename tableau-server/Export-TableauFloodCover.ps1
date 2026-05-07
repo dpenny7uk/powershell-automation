@@ -222,29 +222,48 @@ try {
                                 Start-Sleep -Seconds $RetryDelaySeconds
                             }
 
+                            # Delete any stale file so freshness check is reliable
+                            if (Test-Path $outputFile) {
+                                Remove-Item $outputFile -Force -ErrorAction SilentlyContinue
+                            }
+
+                            # Capture tabcmd output so failures are diagnosable
+                            $stdoutFile = Join-Path $env:TEMP "tabcmd_out_$([guid]::NewGuid().ToString('N')).log"
+                            $stderrFile = Join-Path $env:TEMP "tabcmd_err_$([guid]::NewGuid().ToString('N')).log"
                             $exportArgString = "export `"$url`" --fullpdf --pagelayout portrait --pagesize a4 --filename `"$outputFile`""
-                            $proc = Start-Process -FilePath $tabcmdExe -ArgumentList $exportArgString -NoNewWindow -PassThru
+                            $proc = Start-Process -FilePath $tabcmdExe -ArgumentList $exportArgString -NoNewWindow -PassThru `
+                                -RedirectStandardOutput $stdoutFile -RedirectStandardError $stderrFile
                             $exited = $proc.WaitForExit($ExportTimeoutMs)
+                            if ($exited) { $proc.WaitForExit() }  # second call ensures ExitCode is finalized
 
                             if (-not $exited) {
                                 try { $proc.Kill() } catch {}
                                 Write-Host "  TIMEOUT after $([math]::Round($ExportTimeoutMs / 60000))m: $($partner.FileName)"
+                                Remove-Item $stdoutFile, $stderrFile -Force -ErrorAction SilentlyContinue
                                 continue
                             }
 
-                            if ($proc.ExitCode -eq 0 -and (Test-Path $outputFile)) {
-                                $sizeKB = [math]::Round((Get-Item $outputFile).Length / 1KB, 1)
-                                if ($sizeKB -lt $MinFileSizeKB) {
-                                    Write-Host "  SUSPECT: $($partner.FileName) is only ${sizeKB} KB - possible blank export"
-                                    Remove-Item $outputFile -Force -ErrorAction SilentlyContinue
-                                    continue
-                                }
-                                Write-Host "  Exported: $($partner.FileName) (${sizeKB} KB)"
+                            $exitCode = $proc.ExitCode
+                            $fileExists = Test-Path $outputFile
+                            $sizeKB = if ($fileExists) { [math]::Round((Get-Item $outputFile).Length / 1KB, 1) } else { 0 }
+
+                            if ($fileExists -and $sizeKB -ge $MinFileSizeKB) {
+                                Write-Host "  Exported: $($partner.FileName) (${sizeKB} KB, exit $exitCode)"
                                 $exported = $true
+                                Remove-Item $stdoutFile, $stderrFile -Force -ErrorAction SilentlyContinue
                                 break
                             }
 
-                            Write-Host "  FAILED (attempt $attempt): $($partner.FileName) - exit code $($proc.ExitCode)"
+                            $reason = if (-not $fileExists) { "no file produced" }
+                                      elseif ($sizeKB -lt $MinFileSizeKB) { "${sizeKB} KB < min ${MinFileSizeKB} KB (likely blank)" }
+                                      else { "unknown" }
+                            Write-Host "  FAILED (attempt $attempt): $($partner.FileName) - exit code '$exitCode', $reason"
+                            $tabcmdOut = (Get-Content $stdoutFile -Raw -ErrorAction SilentlyContinue) + (Get-Content $stderrFile -Raw -ErrorAction SilentlyContinue)
+                            if ($tabcmdOut) {
+                                Write-Host "  tabcmd output: $($tabcmdOut.Trim())"
+                            }
+                            if ($fileExists) { Remove-Item $outputFile -Force -ErrorAction SilentlyContinue }
+                            Remove-Item $stdoutFile, $stderrFile -Force -ErrorAction SilentlyContinue
                         }
 
                         if ($exported) { $success++ } else { $failed++ }
