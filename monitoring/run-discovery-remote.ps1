@@ -24,7 +24,7 @@
       - odbc-discovery-v2.ps1 in the same folder as this wrapper, OR pass
         -ScriptPath explicitly.
 
-    Requirements (Hiscox side, before sending):
+    Requirements (Contoso side, before sending):
       - Decide on the server list. Send Hexaware a CSV named e.g. shir-servers.csv
         with one column "Server" and one host per row.
 
@@ -48,10 +48,6 @@
 
 .PARAMETER ThrottleLimit
     Max parallel remote sessions. Default 8.
-
-.PARAMETER UseSSL
-    Use WinRM-over-HTTPS (port 5986). Requires the runner trusts the remote
-    cert. Default off (HTTP / 5985).
 
 .PARAMETER DryRun
     Connectivity test only. Opens sessions, reports success/failure, closes.
@@ -82,7 +78,6 @@ param(
     [string]$ReturnDir,
     [System.Management.Automation.PSCredential]$Credential,
     [int]$ThrottleLimit = 8,
-    [switch]$UseSSL,
     [switch]$DryRun
 )
 
@@ -125,7 +120,7 @@ Log "Servers:        $($Servers.Count) ($($Servers -join ', '))"
 Log "ScriptPath:     $ScriptPath"
 Log "ReturnDir:      $ReturnDir"
 Log "ThrottleLimit:  $ThrottleLimit"
-Log "UseSSL:         $UseSSL"
+Log "UseSSL:         True (hardcoded - Contoso WinRM is HTTPS-only)"
 Log "DryRun:         $DryRun"
 Log "Credential:     $(if ($Credential) { $Credential.UserName } else { '<current user / Kerberos>' })"
 Log "================================================================="
@@ -134,11 +129,11 @@ Log "================================================================="
 $sessionParams = @{
     ComputerName  = $Servers
     ThrottleLimit = $ThrottleLimit
+    UseSSL        = $true     # Contoso WinRM is HTTPS-only (5986). 5985 is firewalled estate-wide.
     ErrorAction   = 'SilentlyContinue'
     ErrorVariable = 'sessionErrors'
 }
 if ($Credential) { $sessionParams.Credential = $Credential }
-if ($UseSSL)     { $sessionParams.UseSSL = $true }
 
 Write-Host ""
 Write-Host "Opening sessions to $($Servers.Count) servers (throttle=$ThrottleLimit)..." -ForegroundColor Cyan
