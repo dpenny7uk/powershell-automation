@@ -99,6 +99,16 @@ if ($ServerListPath) {
 $Servers = $Servers | Where-Object { $_ } | Select-Object -Unique
 if (-not $Servers) { throw "No servers resolved from inputs." }
 
+# Normalise short names to FQDNs. WinRM HTTPS cert CN check requires the
+# connect name to match the listener cert subject (issued to the FQDN).
+$dnsSuffix = $env:USERDNSDOMAIN
+if (-not $dnsSuffix) {
+    throw "Cannot determine DNS suffix from %USERDNSDOMAIN%. Provide FQDNs in the server list."
+}
+$Servers = @(foreach ($s in $Servers) {
+    if ($s -match '\.') { $s } else { "$s.$($dnsSuffix.ToLower())" }
+})
+
 if (-not $ScriptPath) {
     $ScriptPath = Join-Path (Split-Path -Parent $PSCommandPath) 'odbc-discovery-v2.ps1'
 }
