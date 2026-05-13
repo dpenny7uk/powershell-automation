@@ -85,7 +85,7 @@ param(
 )
 
 $ErrorActionPreference = 'Stop'
-$ScriptVersion = '1.0.0'
+$ScriptVersion = '1.0.1'
 $ts = (Get-Date).ToUniversalTime().ToString("yyyyMMdd_HHmmss") + "Z"
 if (-not $OutDir) { $OutDir = "E:\Libcurl_Remediation\Output\remediation-plan-$ts" }
 New-Item -ItemType Directory -Path $OutDir -Force | Out-Null
@@ -97,12 +97,14 @@ $tenable = Import-Csv -LiteralPath $TenableFlatCsv
 if (-not $tenable) { throw "Tenable CSV empty or unreadable: $TenableFlatCsv" }
 $tenableCols = $tenable[0].PSObject.Properties.Name
 
-# Resolve column names defensively
-$pathCol    = ($tenableCols | Where-Object { $_ -in 'Path','LibcurlPath','output.1' })[0]
-$hostCol    = ($tenableCols | Where-Object { $_ -in 'asset.host_name','Host','HostName','asset_host_name' })[0]
-$famCol     = ($tenableCols | Where-Object { $_ -in 'DriverFamily','Driver Family','driver_family','Driver' })[0]
-$productCol = ($tenableCols | Where-Object { $_ -in 'Product','Sub Cat','SubCat' })[0]
-$versionCol = ($tenableCols | Where-Object { $_ -in 'LibcurlFileVersion','InstalledVersion','Version' })[0]
+# Resolve column names defensively.
+# NOTE: Use Select-Object -First 1 rather than [0]. When Where-Object returns a single
+# string, [0] indexes into the string and returns its first CHARACTER. Subtle PS gotcha.
+$pathCol    = $tenableCols | Where-Object { $_ -in 'Path','LibcurlPath','output.1' }                          | Select-Object -First 1
+$hostCol    = $tenableCols | Where-Object { $_ -in 'asset.host_name','Host','HostName','asset_host_name' }   | Select-Object -First 1
+$famCol     = $tenableCols | Where-Object { $_ -in 'DriverFamily','Driver Family','driver_family','Driver' } | Select-Object -First 1
+$productCol = $tenableCols | Where-Object { $_ -in 'Product','Sub Cat','SubCat' }                            | Select-Object -First 1
+$versionCol = $tenableCols | Where-Object { $_ -in 'LibcurlFileVersion','InstalledVersion','Version' }       | Select-Object -First 1
 if (-not $pathCol) { throw "Tenable CSV must have a Path column. Found: $($tenableCols -join ', ')" }
 Write-Host "  Rows: $($tenable.Count) (path=$pathCol; host=$hostCol; family=$famCol; product=$productCol; version=$versionCol)" -ForegroundColor Green
 
@@ -261,7 +263,11 @@ foreach ($row in $tenable) {
         $action = 'MCAFEE_AGENT_UPDATE'
         $rationale = "McAfee Agent libcurl. Endpoint security team owns the McAfee Agent update cycle."
     }
-    elseif ($product -in @('SHIR','Power BI Gateway','SSMS','SSDT','Power BI Desktop')) {
+    elseif ($product -eq 'Power BI Desktop') {
+        $action = 'VENDOR_UPDATE_PowerBIDesktop'
+        $rationale = "Power BI Desktop on user workstation. EUC team to push update via comms. Microsoft Store install auto-updates; direct-download installs need manual update."
+    }
+    elseif ($product -in @('SHIR','Power BI Gateway','SSMS','SSDT')) {
         # In-scope for GV-228
         if ($shirLsCount -gt 0 -and $runsForLs -gt 0) {
             $action = 'UPGRADE_DRIVER_MSI'
