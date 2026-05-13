@@ -45,7 +45,7 @@ param(
 )
 
 $ErrorActionPreference = 'Continue'
-$ScriptVersion = '2.1.0'
+$ScriptVersion = '2.1.1'
 
 # ---------- Run metadata (audit / handoff verification) ----------
 $h        = $env:COMPUTERNAME
@@ -179,28 +179,32 @@ $libcurlCsv = Join-Path $workDir "$h-libcurl-inventory.csv"
 $libcurlInventory | Export-Csv -NoTypeInformation -Path $libcurlCsv
 Log "libcurl.dll instances found: $($libcurlInventory.Count)"
 
-# ---------- 3. Loaded libcurl modules in running SHIR/Gateway/SSMS/PBI processes ----------
+# ---------- 3. Loaded libcurl modules in ANY running process ----------
+# Scan every process for libcurl modules rather than filtering by process name.
+# SHIR/Gateway/SSMS/PBI process names vary across versions (e.g. SHIR 4.x uses
+# DIAHostService, SHIR 5.x sometimes diahost; PBI gateway has long .NET-style names).
+# Filtering by module name catches them all regardless of process branding.
 $loadedModules = New-Object System.Collections.Generic.List[object]
-$processNames = @('diahost','diawp','DataExchange.Hosts','Microsoft.Mashup.Container','PBIDesktop','Ssms',
-                  'Microsoft.PowerBI.EnterpriseGateway','Microsoft.PowerBI.DataMovement.Pipeline.GatewayCore')
-foreach ($pn in $processNames) {
-    foreach ($proc in (Get-Process -Name $pn -ErrorAction SilentlyContinue)) {
-        try {
-            foreach ($mod in $proc.Modules) {
-                if ($mod.ModuleName -like 'libcurl*') {
-                    $loadedModules.Add([PSCustomObject]@{
-                        Host=$h; ProcessName=$proc.Name; ProcessId=$proc.Id
-                        ModuleName=$mod.ModuleName; FilePath=$mod.FileName
-                        FileVersion=$mod.FileVersionInfo.FileVersion
-                    })
-                }
+$skippedCount = 0
+foreach ($proc in (Get-Process -ErrorAction SilentlyContinue)) {
+    try {
+        foreach ($mod in $proc.Modules) {
+            if ($mod.ModuleName -like 'libcurl*') {
+                $loadedModules.Add([PSCustomObject]@{
+                    Host=$h; ProcessName=$proc.Name; ProcessId=$proc.Id
+                    ModuleName=$mod.ModuleName; FilePath=$mod.FileName
+                    FileVersion=$mod.FileVersionInfo.FileVersion
+                })
             }
-        } catch { Log "Module enum failed for $($proc.Name) PID $($proc.Id): $_" 'WARN' }
+        }
+    } catch {
+        # .Modules unavailable for some processes (protected, x86/x64 mismatch, access denied). Silently skip.
+        $skippedCount++
     }
 }
 $loadedCsv = Join-Path $workDir "$h-loaded-libcurl-MODULES.csv"
 $loadedModules | Export-Csv -NoTypeInformation -Path $loadedCsv
-Log "Currently-loaded libcurl modules: $($loadedModules.Count) <-- strong evidence of active use"
+Log "Currently-loaded libcurl modules: $($loadedModules.Count) (scanned all running processes; $skippedCount module-enum failures silently skipped) <-- strong evidence of active use"
 
 # ---------- 4. Registered ODBC drivers (real DLL versions) ----------
 $drivers = New-Object System.Collections.Generic.List[object]
@@ -225,18 +229,34 @@ $driversCsv = Join-Path $workDir "$h-registered-drivers.csv"
 $drivers | Export-Csv -NoTypeInformation -Path $driversCsv
 Log "Registered ODBC drivers: $($drivers.Count)"
 
-# ---------- 5. SHIR event log ----------
-try {
-    $events = Get-WinEvent -FilterHashtable @{
-        LogName='Application'; ProviderName='Integration Runtime'
-        StartTime=(Get-Date).AddDays(-$EventDays)
-    } -ErrorAction Stop |
-    Select-Object @{n='Host';e={$h}}, TimeCreated, Id, LevelDisplayName,
-        @{n='Message';e={($_.Message -replace '\s+',' ').Substring(0,[Math]::Min(($_.Message.Length),500))}}
-    $eventsCsv = Join-Path $workDir "$h-shir-events-${EventDays}d.csv"
-    $events | Export-Csv -NoTypeInformation -Path $eventsCsv
-    Log "SHIR event log entries (last $EventDays days): $(@($events).Count)"
-} catch { Log "SHIR event log capture: $_" 'WARN' }
+# ---------- 5. SHIR / Data Management Gateway event log ----------
+# Provider name varies across SHIR / Gateway versions:
+#   'Integration Runtime', 'Microsoft Integration Runtime', 'DataManagementGateway',
+#   'Data Management Gateway', 'Microsoft-DataTransfer-*', 'DataExchange*', etc.
+# Discover which ones are registered on THIS host before querying.
+$providerPatterns = @('Integration Runtime','Microsoft Integration Runtime','*DataManagementGateway*','*Data Management Gateway*','*DataTransfer*','*DataExchange*')
+$realProviders = New-Object System.Collections.Generic.List[string]
+foreach ($pattern in $providerPatterns) {
+    Get-WinEvent -ListProvider $pattern -ErrorAction SilentlyContinue | ForEach-Object { $realProviders.Add($_.Name) }
+}
+$realProviders = $realProviders | Select-Object -Unique
+if (-not $realProviders) {
+    Log "No SHIR/Gateway event providers registered on this host - skipping event capture." 'WARN'
+} else {
+    Log "Querying event providers: $($realProviders -join ', ')"
+    try {
+        $events = Get-WinEvent -FilterHashtable @{
+            LogName      = 'Application'
+            ProviderName = $realProviders
+            StartTime    = (Get-Date).AddDays(-$EventDays)
+        } -ErrorAction Stop |
+        Select-Object @{n='Host';e={$h}}, TimeCreated, Id, LevelDisplayName, ProviderName,
+            @{n='Message';e={($_.Message -replace '\s+',' ').Substring(0,[Math]::Min(($_.Message.Length),500))}}
+        $eventsCsv = Join-Path $workDir "$h-shir-events-${EventDays}d.csv"
+        $events | Export-Csv -NoTypeInformation -Path $eventsCsv
+        Log "SHIR/Gateway event log entries (last $EventDays days): $(@($events).Count)"
+    } catch { Log "Event log capture: $_" 'WARN' }
+}
 
 # ---------- 6. System DSNs (INFORMATIONAL ONLY) ----------
 $sensitiveKeys = @('PWD','PASSWORD','PASSWD','TOKEN','APIKEY','API_KEY','SECRET','CREDENTIAL','AUTHTOKEN','PRIVATEKEY')
