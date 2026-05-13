@@ -45,7 +45,7 @@ param(
 )
 
 $ErrorActionPreference = 'Continue'
-$ScriptVersion = '1.0.0'
+$ScriptVersion = '1.0.1'
 $ts = (Get-Date).ToUniversalTime().ToString("yyyyMMdd_HHmmss") + "Z"
 if (-not $OutDir) { $OutDir = "E:\Libcurl_Remediation\Output\adf-evidence-$ts" }
 New-Item -ItemType Directory -Path $OutDir -Force | Out-Null
@@ -97,7 +97,9 @@ if (-not $accounts) { throw "az account list returned nothing. Run: az login --u
 $script:token       = $null
 $script:tokenExpiry = [datetime]::MinValue
 function Get-MgmtToken {
-    if ((Get-Date) -lt $script:tokenExpiry.AddMinutes(-5)) { return $script:token }
+    # Short-circuit: only do the expiry math when we already have a cached token.
+    # Avoids AddMinutes(-5) on [datetime]::MinValue (would throw "un-representable DateTime").
+    if ($script:token -and (Get-Date) -lt $script:tokenExpiry.AddMinutes(-5)) { return $script:token }
     $raw = az account get-access-token --resource 'https://management.azure.com/' --output json 2>$null
     if (-not $raw) { throw "Failed to get access token. Re-run az login." }
     $obj = $raw | ConvertFrom-Json
